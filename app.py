@@ -24,10 +24,6 @@ st.set_page_config(page_title="AstroFlow", layout="wide")
 st.title("AstroFlow")
 st.markdown("Upload FITS files to analyze spectra and biosignatures.")
 
-# Common column names for auto-detection
-WL_COLS = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WLEN']
-FLUX_COLS = ['FLUX', 'FLUX_DENSITY', 'SPECTRUM', 'INTENSITY']
-
 # File upload
 uploaded = st.file_uploader("Upload FITS files", type=["fits"], accept_multiple_files=True)
 if not uploaded:
@@ -48,17 +44,6 @@ st.success(f"Saved {len(file_paths)} files: {[os.path.basename(p) for p in file_
 def analyze_all_fits():
     result = {"prints": "", "figs": [], "files": []}
     before_files = set(os.listdir(work_dir))
-    pre_figs = set(plt.get_fignums())
-    captured_figs = []
-    orig_show = plt.show
-    def fake_show(*a, **kw):
-        try:
-            fig = plt.gcf()
-            captured_figs.append(fig)
-            plt.close(fig)
-        except:
-            pass
-    plt.show = fake_show
     stdout_buf = io.StringIO()
     orig_glob = glob.glob
     def patched_glob(pattern):
@@ -74,12 +59,15 @@ def analyze_all_fits():
                 print("No FITS files provided.")
                 return result
             
-            wavelengths_all, fluxes_all, headers = [], [], []
+            wavelengths_all, fluxes_all = [], []
+            # Common column names for auto-detection
+            WL_COLS = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WLEN']
+            FLUX_COLS = ['FLUX', 'FLUX_DENSITY', 'SPECTRUM', 'INTENSITY']
             
             for file_path in file_paths:
                 print(f"\n--- Analyzing {file_path} ---")
                 try:
-                    with fits.open(file_path) as hdul:
+                    with fits.open(file_path, memmap=False) as hdul:  # Disable memmap to reduce memory
                         hdul.info()  # Print HDU structure
                         found_data = False
                         
@@ -103,46 +91,63 @@ def analyze_all_fits():
                                         wl_valid, fl_valid = wl[mask_valid], fl[mask_valid]
                                         wavelengths_all.append(wl_valid)
                                         fluxes_all.append(fl_valid)
-                                        headers.append(hdu.header)
                                         found_data = True
                                         print(f"  Extracted {len(wl_valid)} valid points from '{wl_col}' vs '{flux_col}'")
                                         # Quick plot for this data
-                                        plt.figure(figsize=(10, 6))
+                                        fig = plt.figure(figsize=(10, 6))
                                         plt.plot(wl_valid, fl_valid, label=f"{wl_col} vs {flux_col}")
                                         plt.title(f"{file_path} HDU {idx} Spectrum")
                                         plt.xlabel(wl_col)
                                         plt.ylabel(flux_col)
                                         plt.legend()
                                         plt.grid(True)
-                                        plt.show()
+                                        buf = io.BytesIO()
+                                        fig.savefig(buf, format='png', bbox_inches='tight')
+                                        buf.seek(0)
+                                        result["figs"].append(buf.getvalue())
+                                        plt.close(fig)  # Close to free memory
                                 else:
                                     print("  No wl/flux columns; plotting first 3 columns.")
                                     if hdu.data.names:
-                                        plt.figure(figsize=(10, 6))
+                                        fig = plt.figure(figsize=(10, 6))
                                         for col in hdu.data.names[:3]:
                                             plt.plot(hdu.data[col], label=col)
                                         plt.title(f"{file_path} HDU {idx} Columns")
                                         plt.legend()
-                                        plt.show()
+                                        buf = io.BytesIO()
+                                        fig.savefig(buf, format='png', bbox_inches='tight')
+                                        buf.seek(0)
+                                        result["figs"].append(buf.getvalue())
+                                        plt.close(fig)  # Close to free memory
                             else:  # Image HDU
                                 data = hdu.data
                                 print(f"  Image data shape: {data.shape}")
                                 if data.ndim == 1:
-                                    plt.figure(figsize=(10, 6))
+                                    fig = plt.figure(figsize=(10, 6))
                                     plt.plot(data, label='1D Data')
                                     plt.title(f"{file_path} HDU {idx} 1D Image")
                                     plt.legend()
-                                    plt.show()
+                                    buf = io.BytesIO()
+                                    fig.savefig(buf, format='png', bbox_inches='tight')
+                                    buf.seek(0)
+                                    result["figs"].append(buf.getvalue())
+                                    plt.close(fig)  # Close to free memory
                                 elif data.ndim == 2:
-                                    plt.figure(figsize=(10, 6))
+                                    fig = plt.figure(figsize=(10, 6))
                                     plt.imshow(data, cmap='gray', aspect='auto')
                                     plt.title(f"{file_path} HDU {idx} 2D Image")
                                     plt.colorbar()
-                                    plt.show()
+                                    buf = io.BytesIO()
+                                    fig.savefig(buf, format='png', bbox_inches='tight')
+                                    buf.seek(0)
+                                    result["figs"].append(buf.getvalue())
+                                    plt.close(fig)  # Close to free memory
                                 found_data = True
                             
                             if not found_data:
                                 print(f"  No plottable data in {file_path}")
+                            del hdu  # Clear HDU to free memory
+                        del hdul  # Clear HDUL to free memory
                 
                 except Exception as e:
                     print(f"Error processing {file_path}: {e}")
@@ -170,7 +175,7 @@ def analyze_all_fits():
                 combined = 1 + sum(bio_curves.values())
                 
                 # Plot stacked spectrum vs biosignatures
-                plt.figure(figsize=(14, 6))
+                fig = plt.figure(figsize=(14, 6))
                 plt.plot(ref_wl, stacked_smoothed, label='Stacked Smoothed Spectrum', color='black', linewidth=1.5)
                 plt.plot(ref_wl, combined, label='Simulated Biosignatures', linestyle='--', color='tomato')
                 colors = ['skyblue', 'violet', 'lightgreen', 'gold', 'lightcoral']
@@ -183,7 +188,11 @@ def analyze_all_fits():
                 plt.grid(True)
                 plt.legend()
                 plt.tight_layout()
-                plt.show()
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', bbox_inches='tight')
+                buf.seek(0)
+                result["figs"].append(buf.getvalue())
+                plt.close(fig)  # Close to free memory
                 
                 # SNR calculation
                 def calc_snr(wl_range):
@@ -219,14 +228,15 @@ def analyze_all_fits():
                 snr_csv = os.path.join(work_dir, "snr.csv")
                 snr_df.to_csv(snr_csv, index=False)
                 
+                # Clear large variables
+                del wavelengths_all, fluxes_all, interpolated_fluxes, stacked_flux, flux_norm
+                del stacked_smoothed, ref_wl, bio_curves, combined, snr_results
+                
     except Exception as e:
         print(f"Error during analysis: {e}")
     
     result["prints"] = stdout_buf.getvalue()
-    post_figs = set(plt.get_fignums())
-    result["figs"] = captured_figs + [plt.figure(n) for n in (post_figs - pre_figs)]
     result["files"] = [os.path.join(work_dir, f) for f in (set(os.listdir(work_dir)) - before_files)]
-    plt.show = orig_show
     glob.glob = orig_glob
     return result
 
@@ -243,18 +253,12 @@ if st.button("Run Analysis"):
     # Display plots
     if res["figs"]:
         st.subheader("Plots")
-        for i, fig in enumerate(res["figs"]):
+        for i, img_data in enumerate(res["figs"]):
             try:
-                st.pyplot(fig)
+                st.image(img_data, caption=f"Plot {i}", use_column_width=True)
+                st.download_button(f"Download Plot {i}.png", img_data, file_name=f"plot_{i}.png")
             except Exception as e:
-                try:
-                    buf = io.BytesIO()
-                    fig.savefig(buf, format='png', bbox_inches='tight')
-                    buf.seek(0)
-                    st.image(buf.getvalue(), caption=f"Plot {i}", use_column_width=True)
-                    st.download_button(f"Download Plot {i}.png", buf.getvalue(), file_name=f"plot_{i}.png")
-                except Exception as e2:
-                    st.write(f"Failed to display or save plot {i}: {e2}")
+                st.write(f"Failed to display plot {i}: {e}")
     
     # Display generated files
     if res["files"]:
