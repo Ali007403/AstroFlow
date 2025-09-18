@@ -10,67 +10,88 @@ Original file is located at
 # app.py
 import streamlit as st
 import numpy as np
-import matplotlib.pyplot as plt
 from astropy.io import fits
 from scipy.signal import savgol_filter
-from scipy.optimize import curve_fit
 import pandas as pd
-import tempfile
-import os
-import io
-from typing import Dict, Tuple, List
+import tempfile, os, io, time
+from typing import List, Tuple, Dict, Optional
+import plotly.graph_objects as go
+import plotly.express as px
 
-st.set_page_config(page_title="AstroFlow · FITS Processor", layout="wide")
+st.set_page_config(page_title="AstroFlow · FITSFlow", layout="wide", initial_sidebar_state="expanded")
 
-# -------------------------
-# Utility / Processing Code
-# -------------------------
-
-WL_COLS = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WLEN', 'LAMBDA_MICRON', 'LAMBDA_UM']
-FLUX_COLS = ['FLUX', 'FLUX_DENSITY', 'SPECTRUM', 'INTENSITY', 'FLUX_1']
+# ---------------------------
+# Helper / Processing Utils
+# ---------------------------
+WL_COLS = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WLEN', 'LAMBDA_MICRON', 'LAMBDA_UM', 'WAVELENGTH_MICRON']
+FLUX_COLS = ['FLUX', 'FLUX_DENSITY', 'SPECTRUM', 'INTENSITY', 'FLUX_1', 'FLUX_0']
 
 def safe_names(arr):
-    """Return list of column names if numpy recarray/table, else empty."""
     try:
         return list(arr.names)
     except Exception:
         return []
 
 def find_wl_flux_from_table(table):
-    """Try to find wavelength and flux columns in an astropy table-like HDU data."""
     names = safe_names(table)
     wl_col = next((c for c in WL_COLS if c in names), None)
-    flux_col = next((c for c in FLUX_COLS if c in names), None)
-    return wl_col, flux_col
+    fl_col = next((c for c in FLUX_COLS if c in names), None)
+    return wl_col, fl_col
+
+def try_extract_spectrum(hdu):
+    data = hdu.data
+    if data is None:
+        return None, None
+    # Table-like
+    if hasattr(data, 'names'):
+        wl_col, fl_col = find_wl_flux_from_table(data)
+        if wl_col and fl_col:
+            wl = np.array(data[wl_col]).astype(float).flatten()
+            fl = np.array(data[fl_col]).astype(float).flatten()
+            mask = np.isfinite(wl) & np.isfinite(fl)
+            return wl[mask], fl[mask]
+        # fallback: first two numeric columns
+        names = safe_names(data)
+        nums = [n for n in names if np.issubdtype(data[n].dtype, np.number)]
+        if len(nums) >= 2:
+            wl = np.array(data[nums[0]]).astype(float).flatten()
+            fl = np.array(data[nums[1]]).astype(float).flatten()
+            mask = np.isfinite(wl) & np.isfinite(fl)
+            return wl[mask], fl[mask]
+    # Image-like
+    try:
+        arr = np.array(data)
+        if arr.ndim == 1:
+            wl = np.arange(arr.size)
+            fl = arr.astype(float)
+            mask = np.isfinite(fl)
+            return wl[mask], fl[mask]
+        elif arr.ndim == 2:
+            fl = np.nanmean(arr, axis=0)
+            wl = np.arange(fl.size)
+            mask = np.isfinite(fl)
+            return wl[mask], fl[mask]
+    except Exception:
+        pass
+    return None, None
 
 def interp_to_reference(wl, fl, ref_wl):
-    # safe interpolation with nan handling
     try:
         return np.interp(ref_wl, wl, fl, left=np.nan, right=np.nan)
     except Exception:
         return np.full_like(ref_wl, np.nan)
 
-def gaussian(x, mu, sigma, amp):
-    return amp * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-
-def gauss_fit(x, y, guess):
-    """Fit a single gaussian to x,y around guess params (mu, sigma, amp)."""
-    try:
-        p0 = [guess.get('mu', x[np.nanargmax(y)]), guess.get('sigma', 0.02), guess.get('amp', np.nanmax(y) - np.nanmin(y))]
-        popt, pcov = curve_fit(gaussian, x, y, p0=p0, maxfev=10000)
-        return popt, np.sqrt(np.diag(pcov))
-    except Exception:
-        return None, None
+def smooth_flux(flux, window, polyorder):
+    if len(flux) >= window and window % 2 == 1:
+        return savgol_filter(flux, window, polyorder)
+    return flux
 
 def calc_snr_on_band(ref_wl, ref_flux, band_range: Tuple[float,float]):
-    """Simple SNR calc: signal = depth compared to continuum; noise = std of adjacent windows."""
     start, end = band_range
     mask = (ref_wl >= start) & (ref_wl <= end)
     if not np.any(mask):
         return 0.0
-    # signal as absolute deviation from local continuum (1 if normalized)
     signal = np.abs(1 - np.nanmean(ref_flux[mask]))
-    # define noise windows adjacent
     left_mask = (ref_wl >= (start - 0.3)) & (ref_wl <= (start - 0.1))
     right_mask = (ref_wl >= (end + 0.1)) & (ref_wl <= (end + 0.3))
     noise_vals = []
@@ -81,272 +102,264 @@ def calc_snr_on_band(ref_wl, ref_flux, band_range: Tuple[float,float]):
     noise = np.nanmean(noise_vals) if noise_vals else np.nanstd(ref_flux)
     if noise == 0 or np.isnan(noise):
         return 0.0
-    return signal / noise
+    return float(signal / noise)
 
-def try_extract_spectrum(hdu):
-    """
-    Given an HDU (table or image), attempt to return wavelength, flux arrays (1D).
-    Returns (wl, fl) or (None, None).
-    """
-    data = hdu.data
-    hdr = hdu.header
-    # Table-like
-    if hasattr(data, 'names'):
-        wl_col, fl_col = find_wl_flux_from_table(data)
-        if wl_col and fl_col:
-            wl = np.array(data[wl_col]).astype(float).flatten()
-            fl = np.array(data[fl_col]).astype(float).flatten()
-            mask = np.isfinite(wl) & np.isfinite(fl)
-            return wl[mask], fl[mask]
-        # fallback: try first two numeric columns
-        names = safe_names(data)
-        numeric_cols = [n for n in names if np.issubdtype(data[n].dtype, np.number)]
-        if len(numeric_cols) >= 2:
-            wl = np.array(data[numeric_cols[0]]).astype(float).flatten()
-            fl = np.array(data[numeric_cols[1]]).astype(float).flatten()
-            mask = np.isfinite(wl) & np.isfinite(fl)
-            return wl[mask], fl[mask]
-    # Image-like
-    if data is not None:
-        if data.ndim == 1:
-            wl = np.arange(len(data))
-            fl = data.astype(float)
-            mask = np.isfinite(fl)
-            return wl[mask], fl[mask]
-        elif data.ndim == 2:
-            # collapse along one axis (sum or mean) to create 1D spectrum
-            fl = np.nanmean(data, axis=0)
-            wl = np.arange(len(fl))
-            mask = np.isfinite(fl)
-            return wl[mask], fl[mask]
-    return None, None
+# Default molecular bands to highlight (units: same as wavelength in data)
+DEFAULT_BANDS = {
+    "H2O": (1.35, 1.45),
+    "CH4": (1.60, 1.72),
+    "CO2": (2.65, 2.75)
+}
 
-# -------------------------
-# App UI and orchestration
-# -------------------------
+# ---------------------------
+# Sidebar controls (UI)
+# ---------------------------
+st.sidebar.header("AstroFlow Controls")
+st.sidebar.markdown("Upload FITS files and toggle analysis options.")
 
-st.title("🔭 AstroFlow · FITSFlow Processor")
-st.markdown("Upload FITS files (JWST/HST/TESS or generic) and get automatic spectrum extraction, stacking, smoothing, Gaussian fits and SNR analysis. Export CSV/PNG results.")
+smoothing_enabled = st.sidebar.checkbox("Enable smoothing", value=True)
+smoothing_window = st.sidebar.slider("Smoothing window (odd)", 5, 501, 51, step=2)
+polyorder = st.sidebar.slider("SavGol polyorder", 1, 5, 3)
 
-# Sidebar controls
-st.sidebar.header("Analysis controls")
-smoothing_window = st.sidebar.slider("Smoothing window (odd)", min_value=5, max_value=501, value=51, step=2)
-polyorder = st.sidebar.slider("SavGol polyorder", min_value=1, max_value=5, value=3)
-normalize = st.sidebar.checkbox("Normalize stacked spectrum", value=True)
-do_stack = st.sidebar.checkbox("Stack all spectra (if multiple)", value=True)
-do_gauss = st.sidebar.checkbox("Attempt Gaussian fit to strongest line in each spectrum", value=False)
-show_headers = st.sidebar.checkbox("Show FITS headers", value=False)
-download_all = st.sidebar.checkbox("Enable Export All buttons", value=True)
+show_bands = st.sidebar.checkbox("Show molecular bands (overlay)", value=True)
+show_band_h2o = st.sidebar.checkbox("H₂O band", value=True)
+show_band_ch4 = st.sidebar.checkbox("CH₄ band", value=True)
+show_band_co2 = st.sidebar.checkbox("CO₂ band", value=True)
+
+show_snr = st.sidebar.checkbox("Show SNR", value=False)
+show_errorbars = st.sidebar.checkbox("Show error bars (if available)", value=False)
+raw_only = st.sidebar.checkbox("Show raw data only (no smoothing/stacking overlays)", value=False)
+
+stack_enabled = st.sidebar.checkbox("Enable stacking (multi-file)", value=True)
+stack_method = st.sidebar.selectbox("Stack method", ["mean", "median"], index=0)
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("Biosignature bands (µm) are overlaid on stacked plot for quick visual inspection.")
-st.sidebar.markdown("Developed by FutureMind / AstroFlow")
+st.sidebar.markdown("Display / export options")
+enable_downloads = st.sidebar.checkbox("Enable downloads", value=True)
+st.sidebar.markdown("---")
+st.sidebar.caption("Prototype · AstroFlow / FutureMind")
 
-# Upload section
-uploaded_files = st.file_uploader("Upload one or more FITS files", type=["fits"], accept_multiple_files=True)
+# ---------------------------
+# Main UI area
+# ---------------------------
+st.title("🔭 AstroFlow · FITSFlow Processor")
+st.markdown("Upload FITS files (JWST/HST/TESS/generic). Tabs: Raw | Smoothed | Molecule Detection | Stacked | Table")
 
-if not uploaded_files:
-    st.info("Upload FITS files to begin. Example: K2-18b or GJ-1214b sample FITS.")
+uploaded = st.file_uploader("Upload one or more FITS files", type=["fits", "csv"], accept_multiple_files=True)
+
+if not uploaded:
+    st.info("Upload FITS or CSV spectral files to start. Example FITS: K2-18b, GJ-1214b.")
     st.stop()
 
-# Create a temporary working dir for uploads
-with tempfile.TemporaryDirectory() as tmpdir:
-    file_paths = []
-    for up in uploaded_files:
-        path = os.path.join(tmpdir, up.name)
-        with open(path, "wb") as f:
-            f.write(up.read())
-        file_paths.append(path)
+# Save uploaded to temp dir
+tmpdir = tempfile.mkdtemp()
+file_paths = []
+for up in uploaded:
+    dst = os.path.join(tmpdir, up.name)
+    with open(dst, "wb") as f:
+        f.write(up.read())
+    file_paths.append(dst)
 
-    # Container for per-file results
-    all_spectra = []  # list of dicts: {'file':..., 'hdu_index':..., 'wl':..., 'fl':..., 'header':...}
-    progress_bar = st.progress(0)
-    total_files = len(file_paths)
-    idx_file = 0
+# Process files with progress
+results = []  # list of dicts: file, header info, wl, fl, flux_err(optional)
+progress = st.progress(0)
+nfiles = len(file_paths)
+i = 0
 
-    for path in file_paths:
-        idx_file += 1
-        progress_bar.progress(int((idx_file-1) / total_files * 100))
-        st.write(f"### 🔎 Processing `{os.path.basename(path)}`")
-        try:
-            with fits.open(path, memmap=False) as hdul:
-                # show basic hdul info
-                hdunames = [ (i, hdu.header.get('XTENSION', 'PRIMARY'), None if hdu.data is None else getattr(hdu.data, 'shape', None)) for i,hdu in enumerate(hdul) ]
-                if show_headers:
-                    st.write("HDU list (index, type, shape):", hdunames)
+for path in file_paths:
+    i += 1
+    progress.progress(int((i-1)/nfiles*100))
+    fname = os.path.basename(path)
+    try:
+        with fits.open(path, memmap=False) as hdul:
+            # store basic header info (primary)
+            primary_hdr = dict(hdul[0].header)
+            found_any = False
+            for idx, hdu in enumerate(hdul):
+                wl, fl = try_extract_spectrum(hdu)
+                if wl is None:
+                    continue
+                found_any = True
+                # optional: try get uncertainties if present
+                err = None
+                # common naming patterns for error arrays are not standardized; leave as None
+                results.append({
+                    "file": fname,
+                    "path": path,
+                    "hdu_index": idx,
+                    "header": dict(hdu.header),
+                    "wl": np.array(wl, dtype=float),
+                    "fl": np.array(fl, dtype=float),
+                    "err": err
+                })
+            if not found_any:
+                # fallback: if no spectrum found, but image HDUs exist show primary as image later
+                st.warning(f"No 1D spectrum auto-extracted from {fname}. Showing HDU summaries.")
+    except Exception as e:
+        st.error(f"Failed to open {fname}: {e}")
 
-                # Try to extract 1D spectra from any HDU
-                found = False
-                for i,hdu in enumerate(hdul):
-                    wl, fl = try_extract_spectrum(hdu)
-                    if wl is None:
-                        # no spectrum in this HDU
-                        continue
-                    found = True
-                    # store
-                    all_spectra.append({'file': os.path.basename(path), 'path': path, 'hdu_index': i,
-                                        'wl': np.array(wl, dtype=float), 'fl': np.array(fl, dtype=float),
-                                        'header': dict(hdu.header)})
-                # If no spectrum found, show HDU images or tables
-                if not found:
-                    st.warning("No 1D spectrum found automatically in any HDU. Showing HDU summaries.")
-                    for i,hdu in enumerate(hdul):
-                        if hdu.data is None:
-                            continue
-                        if getattr(hdu.data, 'ndim', 0) == 2:
-                            fig, ax = plt.subplots(figsize=(6,3))
-                            ax.imshow(hdu.data, origin='lower', aspect='auto', cmap='gray')
-                            ax.set_title(f"{os.path.basename(path)} - HDU {i} Image")
-                            st.pyplot(fig)
-                        elif getattr(hdu.data, 'ndim', 0) == 1:
-                            fig, ax = plt.subplots(figsize=(6,3))
-                            ax.plot(hdu.data)
-                            ax.set_title(f"{os.path.basename(path)} - HDU {i} 1D")
-                            st.pyplot(fig)
-        except Exception as e:
-            st.error(f"Failed to read {path}: {e}")
+progress.progress(100)
+time.sleep(0.2)
 
-    progress_bar.progress(100)
+if len(results) == 0:
+    st.error("No spectra could be extracted from uploaded files. You may upload pre-processed wavelength+flux CSVs.")
+    st.stop()
 
-    # If we have spectra, present them
-    if len(all_spectra) == 0:
-        st.info("No spectra auto-extracted. Consider checking table column names or providing pre-processed CSV spectra.")
-        st.stop()
+# Build tabs
+tabs = st.tabs(["Raw Spectrum", "Smoothed", "Molecule Detection", "Stacked", "Data Table", "Downloads"])
 
-    # Optionally stack spectra
-    st.markdown("## 🔬 Per-file / per-HDU results")
-    for spec in all_spectra:
-        file_label = f"{spec['file']} (HDU {spec['hdu_index']})"
-        with st.expander(file_label, expanded=False):
-            wl = spec['wl']
-            fl = spec['fl']
-            header = spec['header']
+# Helper to create interactive plotly figure
+def plot_spectrum_interactive(wl, fl, fl_smooth=None, err=None, title="Spectrum", bands=None, show_bands_flag=True, show_error=False):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=wl, y=fl, mode='lines', name='raw', line=dict(color='rgba(0,150,200,0.7)')))
+    if fl_smooth is not None:
+        fig.add_trace(go.Scatter(x=wl, y=fl_smooth, mode='lines', name='smoothed', line=dict(color='black', width=2)))
+    if show_error and err is not None:
+        fig.add_trace(go.Scatter(x=wl, y=fl+err, mode='lines', name='err+', line=dict(width=0), showlegend=False, opacity=0.2))
+        fig.add_trace(go.Scatter(x=wl, y=fl-err, mode='lines', name='err-', line=dict(width=0), showlegend=False, opacity=0.2))
+    if show_bands_flag and bands:
+        for mol,(a,b) in bands.items():
+            fig.add_vrect(x0=a, x1=b, fillcolor="LightSkyBlue", opacity=0.25, layer="below", line_width=0, annotation_text=mol, annotation_position="top left")
+    fig.update_layout(title=title, xaxis_title="Wavelength", yaxis_title="Flux", template="plotly_white", height=400)
+    return fig
 
-            # Basic table / header
-            if show_headers:
-                st.subheader("Header")
-                st.json(header)
+# Create per-file displays inside tabs
+# Raw Spectrum tab
+with tabs[0]:
+    st.header("Raw Spectrum")
+    for res in results:
+        label = f"{res['file']} (HDU {res['hdu_index']})"
+        with st.expander(label, expanded=False):
+            st.subheader("Header (primary keys)")
+            # show a subset to keep it readable
+            hdr = res['header']
+            keys_to_show = {k: hdr[k] for k in list(hdr.keys())[:20]}
+            st.json(keys_to_show)
+            wl = res['wl']; fl = res['fl']; err = res['err']
+            # raw plot
+            fig = plot_spectrum_interactive(wl, fl, fl_smooth=None, err=err, title=label, bands=None, show_bands_flag=False)
+            st.plotly_chart(fig, use_container_width=True)
+            st.write(f"Data points: {len(wl)} | Wavelength range: {wl.min():.3g} – {wl.max():.3g}")
 
-            # Normalize if requested
-            fl_proc = fl.copy().astype(float)
-            if normalize:
-                if np.nanmax(fl_proc) - np.nanmin(fl_proc) != 0:
-                    fl_proc = (fl_proc - np.nanmin(fl_proc)) / (np.nanmax(fl_proc) - np.nanmin(fl_proc))
-
-            # Smoothing (Savitzky-Golay) if series long enough
-            try:
-                if len(fl_proc) >= smoothing_window:
-                    fl_smooth = savgol_filter(fl_proc, smoothing_window if smoothing_window % 2 == 1 else smoothing_window+1, polyorder)
+# Smoothed tab
+with tabs[1]:
+    st.header("Smoothed Spectra")
+    for res in results:
+        label = f"{res['file']} (HDU {res['hdu_index']})"
+        with st.expander(label, expanded=False):
+            wl = res['wl']; fl = res['fl']; err = res['err']
+            if raw_only:
+                st.info("Raw-only mode enabled in sidebar. Toggle off to see smoothing.")
+                fl_smooth = None
+            else:
+                fl_proc = fl.copy()
+                if smoothing_enabled:
+                    fl_smooth = smooth_flux(fl_proc, smoothing_window, polyorder)
                 else:
-                    fl_smooth = fl_proc
-            except Exception:
-                fl_smooth = fl_proc
+                    fl_smooth = None
+            fig = plot_spectrum_interactive(wl, fl, fl_smooth=fl_smooth, err=err, title=label, bands=None, show_bands_flag=False, show_error=show_errorbars)
+            st.plotly_chart(fig, use_container_width=True)
 
-            # Plot raw + smoothed
-            fig, ax = plt.subplots(figsize=(9,3))
-            ax.plot(wl, fl_proc, label='raw', alpha=0.6)
-            ax.plot(wl, fl_smooth, label='smoothed', linewidth=1.2)
-            ax.set_xlabel("Wavelength")
-            ax.set_ylabel("Flux (normalized)" if normalize else "Flux")
-            ax.set_title(file_label)
-            ax.grid(True)
-            ax.legend()
-            st.pyplot(fig)
+# Molecule Detection tab
+with tabs[2]:
+    st.header("Molecule Detection (band overlays)")
+    # build active bands according to toggles
+    active_bands = {}
+    if show_band_h2o: active_bands["H2O"] = DEFAULT_BANDS["H2O"]
+    if show_band_ch4: active_bands["CH4"] = DEFAULT_BANDS["CH4"]
+    if show_band_co2: active_bands["CO2"] = DEFAULT_BANDS["CO2"]
 
-            # Gaussian fit (optional)
-            if do_gauss:
-                # fit strongest local max area: find top peak
-                try:
-                    # work on smoothed
-                    peak_idx = np.nanargmax(fl_smooth)
-                    peak_wl = wl[peak_idx]
-                    # choose window around peak for fitting
-                    half_width = max(3, int(len(wl) * 0.01))  # ~1% of length
-                    fit_mask = (wl >= max(min(wl), peak_wl - 0.1)) & (wl <= min(max(wl), peak_wl + 0.1))
-                    if np.sum(fit_mask) >= 5:
-                        xfit = wl[fit_mask]
-                        yfit = fl_smooth[fit_mask]
-                        guess = {'mu': peak_wl, 'sigma': 0.02, 'amp': np.nanmax(yfit)-np.nanmin(yfit)}
-                        popt, perr = gauss_fit(xfit, yfit, guess)
-                        if popt is not None:
-                            ax.plot(xfit, gaussian(xfit, *popt), 'r--', label='gauss fit')
-                            st.pyplot(fig)  # re-show with fit
-                            st.write("Gaussian params (mu, sigma, amp):", np.round(popt,5))
-                    else:
-                        st.write("Gaussian fit skipped (insufficient points in fit window).")
-                except Exception as e:
-                    st.write("Gaussian fit failed:", e)
+    for res in results:
+        label = f"{res['file']} (HDU {res['hdu_index']})"
+        with st.expander(label, expanded=False):
+            wl = res['wl']; fl = res['fl']
+            if raw_only:
+                fl_proc = fl
+            else:
+                fl_proc = smooth_flux(fl, smoothing_window, polyorder) if smoothing_enabled else fl
+            fig = plot_spectrum_interactive(wl, fl, fl_smooth=fl_proc, err=res['err'], title=label, bands=active_bands, show_bands_flag=show_bands and not raw_only, show_error=show_errorbars)
+            st.plotly_chart(fig, use_container_width=True)
+            if show_snr:
+                st.write("SNR (approx) for shown bands:")
+                snr_table = {mol: calc_snr_on_band(wl, fl_proc, rng) for mol,rng in active_bands.items()}
+                st.json({k: float(np.round(v,3)) for k,v in snr_table.items()})
 
-            # SNR per target biosignature bands (example bands, in same units as wl)
-            bands = {'H2O': (1.35,1.45), 'CH4': (1.60,1.72), 'CO2':(2.65,2.75)}
-            st.write("SNR in selected bands (approx.):")
-            snr_list = {}
-            for mol, rng in bands.items():
-                snr = calc_snr_on_band(wl, fl_smooth, rng)
-                snr_list[mol] = float(np.round(snr,3))
-                st.write(f"{mol}: {snr_list[mol]} σ")
-
-            # Allow downloads: CSV for wl+flux and PNG for last figure
-            df_out = pd.DataFrame({'wavelength': wl, 'flux': fl_proc, 'flux_smoothed': fl_smooth})
-            csv_bytes = df_out.to_csv(index=False).encode('utf-8')
-            st.download_button(label="Download CSV (wavelength,flux,smoothed)", data=csv_bytes, file_name=f"{spec['file']}_hdu{spec['hdu_index']}.csv", mime='text/csv')
-
-            # Save PNG to bytes
-            png_buf = io.BytesIO()
-            fig.savefig(png_buf, format='png', bbox_inches='tight')
-            png_buf.seek(0)
-            st.download_button(label="Download plot (PNG)", data=png_buf, file_name=f"{spec['file']}_hdu{spec['hdu_index']}.png", mime='image/png')
-
-    # If stacking enabled and more than one spectrum
-    if do_stack and len(all_spectra) >= 2:
-        st.markdown("## 🔗 Stacked spectrum")
-        # determine reference wavelength grid across all spectra
-        min_wl = min(np.min(s['wl']) for s in all_spectra)
-        max_wl = max(np.max(s['wl']) for s in all_spectra)
+# Stacked tab
+with tabs[3]:
+    st.header("Stacked Spectrum")
+    if len(results) < 2:
+        st.info("Upload multiple spectra to enable stacking.")
+    else:
+        # determine ref grid
+        min_wl = min(np.nanmin(r['wl']) for r in results)
+        max_wl = max(np.nanmax(r['wl']) for r in results)
         ref_wl = np.linspace(min_wl, max_wl, 2000)
         interp_fluxes = []
-        for s in all_spectra:
-            interp_fluxes.append(interp_to_reference(s['wl'], s['fl'], ref_wl))
-        stacked = np.nanmean(interp_fluxes, axis=0)
-        # normalize if requested
-        if normalize:
-            stacked = (stacked - np.nanmin(stacked)) / (np.nanmax(stacked) - np.nanmin(stacked))
-        # smooth
-        if len(stacked) >= smoothing_window:
-            stacked_smoothed = savgol_filter(np.nan_to_num(stacked, nan=np.nanmean(stacked)), smoothing_window if smoothing_window%2==1 else smoothing_window+1, polyorder)
+        for r in results:
+            interp_fluxes.append(interp_to_reference(r['wl'], r['fl'], ref_wl))
+        arr = np.array(interp_fluxes)
+        if stack_method == "median":
+            stacked = np.nanmedian(arr, axis=0)
         else:
-            stacked_smoothed = stacked
+            stacked = np.nanmean(arr, axis=0)
+        if normalize and not raw_only:
+            stacked = (stacked - np.nanmin(stacked)) / (np.nanmax(stacked) - np.nanmin(stacked))
+        stacked_smooth = smooth_flux(stacked, smoothing_window, polyorder) if (smoothing_enabled and not raw_only) else stacked
 
-        # overlay simulated biosignature markers (just visual)
-        bio_bands = {'H2O': (1.35,1.45), 'CH4': (1.60,1.72), 'CO2': (2.65,2.75)}
-        fig2, ax2 = plt.subplots(figsize=(10,4))
-        ax2.plot(ref_wl, stacked_smoothed, color='black', label='stacked (smoothed)')
-        colors = ['skyblue','violet','lightgreen']
-        for i,(mol,(a,b)) in enumerate(bio_bands.items()):
-            ax2.axvspan(a,b, color=colors[i], alpha=0.25, label=mol)
-        ax2.set_xlabel("Wavelength")
-        ax2.set_ylabel("Normalized flux" if normalize else "Flux")
-        ax2.set_title("Stacked Spectrum")
-        ax2.legend()
-        ax2.grid(True)
-        st.pyplot(fig2)
+        # show stacked plot with band overlays
+        bands_for_plot = {}
+        if show_band_h2o: bands_for_plot["H2O"] = DEFAULT_BANDS["H2O"]
+        if show_band_ch4: bands_for_plot["CH4"] = DEFAULT_BANDS["CH4"]
+        if show_band_co2: bands_for_plot["CO2"] = DEFAULT_BANDS["CO2"]
 
-        # SNR summary for stacked
-        st.write("Stacked SNR:")
-        stacked_snrs = {}
-        for mol, rng in bio_bands.items():
-            snr = calc_snr_on_band(ref_wl, stacked_smoothed, rng)
-            stacked_snrs[mol] = float(np.round(snr,3))
-            st.write(f"{mol}: {stacked_snrs[mol]} σ")
+        fig_st = plot_spectrum_interactive(ref_wl, np.nan_to_num(stacked), fl_smooth=stacked_smooth, err=None, title="Stacked Spectrum", bands=bands_for_plot, show_bands_flag=show_bands and not raw_only, show_error=False)
+        st.plotly_chart(fig_st, use_container_width=True)
 
-        # allow download of stacked CSV + PNG
-        df_stack = pd.DataFrame({'wavelength': ref_wl, 'stacked': stacked, 'stacked_smoothed': stacked_smoothed})
-        st.download_button("Download stacked CSV", df_stack.to_csv(index=False).encode('utf-8'), file_name="stacked_spectrum.csv", mime='text/csv')
-        png_buf2 = io.BytesIO()
-        fig2.savefig(png_buf2, format='png', bbox_inches='tight')
-        png_buf2.seek(0)
-        st.download_button("Download stacked PNG", png_buf2, file_name="stacked_spectrum.png", mime='image/png')
+        if show_snr:
+            st.write("Stacked SNR (approx):")
+            st.json({mol: float(np.round(calc_snr_on_band(ref_wl, stacked_smooth, rng),4)) for mol,rng in bands_for_plot.items()})
 
-    st.success("All results displayed above. You can expand any result card to see raw headers, plots, and download outputs.")
+# Data Table tab
+with tabs[4]:
+    st.header("Data Table")
+    for r in results:
+        label = f"{r['file']} (HDU {r['hdu_index']})"
+        wl = r['wl']; fl = r['fl']
+        df = pd.DataFrame({"wavelength": wl, "flux": fl})
+        st.subheader(label)
+        st.dataframe(df.head(200))
+        if enable_downloads:
+            st.download_button(f"Download CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{r['file']}_hdu{r['hdu_index']}.csv", mime='text/csv')
+
+# Downloads tab
+with tabs[5]:
+    st.header("Downloads & Export")
+    if enable_downloads:
+        # per-file CSVs
+        for r in results:
+            label = f"{r['file']}_hdu{r['hdu_index']}"
+            df = pd.DataFrame({"wavelength": r['wl'], "flux": r['fl']})
+            st.download_button(f"CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{label}.csv", mime='text/csv')
+
+        # stacked exports (if available)
+        if len(results) >= 2:
+            st.write("Stacked export:")
+            # use same stacking logic as above
+            min_wl = min(np.nanmin(r['wl']) for r in results)
+            max_wl = max(np.nanmax(r['wl']) for r in results)
+            ref_wl = np.linspace(min_wl, max_wl, 2000)
+            interp_fluxes = [interp_to_reference(r['wl'], r['fl'], ref_wl) for r in results]
+            arr = np.array(interp_fluxes)
+            stacked = np.nanmedian(arr, axis=0) if stack_method=="median" else np.nanmean(arr, axis=0)
+            if normalize and not raw_only:
+                stacked = (stacked - np.nanmin(stacked)) / (np.nanmax(stacked) - np.nanmin(stacked))
+            df_stack = pd.DataFrame({"wavelength": ref_wl, "stacked": stacked})
+            st.download_button("Download stacked CSV", df_stack.to_csv(index=False).encode('utf-8'), file_name="stacked_spectrum.csv", mime='text/csv')
+    else:
+        st.info("Enable downloads in the sidebar to see export options.")
+
+st.sidebar.success("Ready. Use the tabs to explore raw and processed data.")
+st.caption("AstroFlow · FITSFlow MVP — upload data, toggle options, export results.")
+
 
 
