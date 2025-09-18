@@ -13,9 +13,10 @@ import pandas as pd
 import tempfile
 import os
 import io
+import contextlib
 import matplotlib.pyplot as plt
-from astroflow import core
 import plotly.graph_objects as go
+from astroflow.core import analyze_all_fits
 
 st.set_page_config(page_title="AstroFlow", layout="wide", initial_sidebar_state="expanded")
 
@@ -23,46 +24,15 @@ st.set_page_config(page_title="AstroFlow", layout="wide", initial_sidebar_state=
 def make_key(*parts):
     return "_".join(str(p) for p in parts if p is not None).replace(" ", "_").replace(".", "_")[:200]
 
-WL_COLS = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WLEN']
-FLUX_COLS = ['FLUX', 'FLUX_DENSITY', 'SPECTRUM', 'INTENSITY']
 DEFAULT_BANDS = {"H₂O": (1.35, 1.45), "CH₄": (1.60, 1.72), "CO₂": (2.65, 2.75), "DMS": (3.75, 3.85), "CO": (4.65, 4.75)}
-
-def try_extract_spectrum(hdu):
-    if not hasattr(hdu.data, 'names'):
-        arr = np.array(hdu.data)
-        if arr.ndim == 1:
-            wl = np.arange(arr.size)
-            fl = arr.astype(float)
-            mask = np.isfinite(fl)
-            return wl[mask], fl[mask]
-        elif arr.ndim == 2:
-            fl = np.nanmean(arr, axis=0)
-            wl = np.arange(fl.size)
-            mask = np.isfinite(fl)
-            return wl[mask], fl[mask]
-        return None, None
-    names = hdu.data.names
-    wl_col = next((c for c in WL_COLS if c in names), None)
-    fl_col = next((c for c in FLUX_COLS if c in names), None)
-    if wl_col and fl_col:
-        wl = np.array(hdu.data[wl_col]).astype(float).flatten()
-        fl = np.array(hdu.data[fl_col]).astype(float).flatten()
-        mask = np.isfinite(wl) & np.isfinite(fl)
-        return wl[mask], fl[mask]
-    nums = [n for n in names if np.issubdtype(hdu.data[n].dtype, np.number)]
-    if len(nums) >= 2:
-        wl = np.array(hdu.data[nums[0]]).astype(float).flatten()
-        fl = np.array(hdu.data[nums[1]]).astype(float).flatten()
-        mask = np.isfinite(wl) & np.isfinite(fl)
-        return wl[mask], fl[mask]
-    return None, None
 
 def smooth_flux(flux, window, polyorder):
     if window % 2 == 0:
         window += 1
     if len(flux) >= window >= 3:
         try:
-            return core.savgol_filter(flux, window, polyorder)
+            from scipy.signal import savgol_filter
+            return savgol_filter(flux, window, polyorder)
         except:
             return flux
     return flux
@@ -127,16 +97,17 @@ def run_core_capture(paths):
     
     try:
         with contextlib.redirect_stdout(stdout_buf):
-            result["returns"] = core.analyze_all_fits(paths)
+            result["returns"] = analyze_all_fits()
     except Exception as e:
-        print(f"Error in core.analyze_all_fits: {e}")
+        st.error(f"Error in analyze_all_fits: {e}")
+        result["prints"] = str(e)
     finally:
         plt.show = orig_show
     
     result["prints"] = stdout_buf.getvalue()
     post_figs = set(plt.get_fignums())
-    result["figs"] = captured_figs + [plt.figure(n) for n in post_figs - pre_figs]
-    result["files"] = [os.path.join(work_dir, f) for f in set(os.listdir(work_dir)) - before_files]
+    result["figs"] = captured_figs + [plt.figure(n) for n in (post_figs - pre_figs)]
+    result["files"] = [os.path.join(work_dir, f) for f in (set(os.listdir(work_dir)) - before_files)]
     return result
 
 # Run core
@@ -151,7 +122,7 @@ if st.button("Run Analysis on All Files"):
     
     # Display figures
     if res["figs"]:
-        st.subheader("Plots")
+        st.subheader("Plots from core.py")
         for i, fig in enumerate(res["figs"]):
             try:
                 st.pyplot(fig, key=make_key("fig", i))
@@ -202,7 +173,7 @@ if st.button("Run Analysis on All Files"):
                     st.subheader("SNR Results")
                     snr_results = extra[-1]
                     snr_df = pd.DataFrame(list(snr_results.items()), columns=["Molecule", "SNR (σ)"])
-                    st.dataframe(snr_df)
+                    st.dataframe(snr_df, key=make_key("snr_table"))
                     if enable_downloads:
                         csv = snr_df.to_csv(index=False).encode('utf-8')
                         st.download_button("Download SNR CSV", csv, file_name="snr.csv", key=make_key("snr_csv"))
