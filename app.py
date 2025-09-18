@@ -12,6 +12,7 @@ import tempfile
 import os
 import io
 import contextlib
+import glob
 import matplotlib.pyplot as plt
 import pandas as pd
 from FitsFlow.core import analyze_all_fits
@@ -38,9 +39,9 @@ for up in uploaded:
 st.success(f"Saved {len(file_paths)} files: {[os.path.basename(p) for p in file_paths]}")
 
 # Run core and capture outputs
-def run_core_capture(paths):
+def run_core_capture(temp_dir):
     result = {"prints": "", "figs": [], "files": [], "returns": None}
-    before_files = set(os.listdir(work_dir))
+    before_files = set(os.listdir(temp_dir))
     pre_figs = set(plt.get_fignums())
     captured_figs = []
     orig_show = plt.show
@@ -53,26 +54,33 @@ def run_core_capture(paths):
             pass
     plt.show = fake_show
     stdout_buf = io.StringIO()
+    orig_glob = glob.glob
+    def patched_glob(pattern):
+        if '/content/*.fits' in pattern:
+            return [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.endswith('.fits')]
+        return orig_glob(pattern)
+    glob.glob = patched_glob
     
     try:
         with contextlib.redirect_stdout(stdout_buf):
-            result["returns"] = analyze_all_fits(file_paths=paths)
+            analyze_all_fits()
     except Exception as e:
         st.error(f"Error running analysis: {e}")
         result["prints"] = str(e)
     finally:
         plt.show = orig_show
+        glob.glob = orig_glob
     
     result["prints"] = stdout_buf.getvalue()
     post_figs = set(plt.get_fignums())
     result["figs"] = captured_figs + [plt.figure(n) for n in (post_figs - pre_figs)]
-    result["files"] = [os.path.join(work_dir, f) for f in (set(os.listdir(work_dir)) - before_files)]
+    result["files"] = [os.path.join(temp_dir, f) for f in (set(os.listdir(temp_dir)) - before_files)]
     return result
 
 # Run button
 if st.button("Run Analysis"):
     with st.spinner("Running analysis..."):
-        res = run_core_capture(file_paths)
+        res = run_core_capture(work_dir)
     
     # Display logs
     if res["prints"].strip():
@@ -90,33 +98,6 @@ if st.button("Run Analysis"):
                 fig.savefig(buf, format='png', bbox_inches='tight')
                 buf.seek(0)
                 st.image(buf, caption=f"Plot {i}", use_column_width=True, key=f"fig_img_{i}")
-    
-    # Display returned data
-    if res["returns"]:
-        st.subheader("Results")
-        try:
-            smoothed, ref_wl, valid_mask, combined, bio_curves, snr_results = res["returns"]
-            # Spectrum
-            st.write("**Stacked Spectrum**")
-            df = pd.DataFrame({"Wavelength": ref_wl[valid_mask], "Flux": smoothed[valid_mask]})
-            st.dataframe(df.head(200), key="spectrum_table")
-            st.download_button("Download Spectrum CSV", df.to_csv(index=False).encode('utf-8'), file_name="spectrum.csv", key="spectrum_csv")
-            
-            # Biosignatures
-            st.write("**Biosignatures**")
-            bio_df = pd.DataFrame({"Wavelength": ref_wl[valid_mask], "Combined_Biosignatures": combined[valid_mask]})
-            for mol, curve in bio_curves.items():
-                bio_df[mol] = 1 + curve[valid_mask]
-            st.dataframe(bio_df.head(200), key="bio_table")
-            st.download_button("Download Biosignatures CSV", bio_df.to_csv(index=False).encode('utf-8'), file_name="biosignatures.csv", key="bio_csv")
-            
-            # SNR
-            st.write("**SNR Results**")
-            snr_df = pd.DataFrame(list(snr_results.items()), columns=["Molecule", "SNR (σ)"])
-            st.dataframe(snr_df, key="snr_table")
-            st.download_button("Download SNR CSV", snr_df.to_csv(index=False).encode('utf-8'), file_name="snr.csv", key="snr_csv")
-        except ValueError:
-            st.error("Unexpected return format from core.py. Expected (smoothed, ref_wl, valid_mask, combined, bio_curves, snr_results).")
     
     # Display generated files
     if res["files"]:
