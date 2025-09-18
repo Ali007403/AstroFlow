@@ -14,7 +14,7 @@ import io
 import contextlib
 import matplotlib.pyplot as plt
 import pandas as pd
-from astroflow.core import analyze_all_fits
+from FitsFlow.core import analyze_all_fits
 
 st.set_page_config(page_title="AstroFlow", layout="wide")
 
@@ -94,26 +94,29 @@ if st.button("Run Analysis"):
     # Display returned data
     if res["returns"]:
         st.subheader("Results")
-        smoothed, ref_wl, valid_mask, combined, bio_curves, snr_results = res["returns"]
-        # Spectrum
-        st.write("**Stacked Spectrum**")
-        df = pd.DataFrame({"Wavelength": ref_wl[valid_mask], "Flux": smoothed[valid_mask]})
-        st.dataframe(df.head(200), key="spectrum_table")
-        st.download_button("Download Spectrum CSV", df.to_csv(index=False).encode('utf-8'), file_name="spectrum.csv", key="spectrum_csv")
-        
-        # Biosignatures
-        st.write("**Biosignatures**")
-        bio_df = pd.DataFrame({"Wavelength": ref_wl[valid_mask], "Combined_Biosignatures": combined[valid_mask]})
-        for mol, curve in bio_curves.items():
-            bio_df[mol] = 1 + curve[valid_mask]
-        st.dataframe(bio_df.head(200), key="bio_table")
-        st.download_button("Download Biosignatures CSV", bio_df.to_csv(index=False).encode('utf-8'), file_name="biosignatures.csv", key="bio_csv")
-        
-        # SNR
-        st.write("**SNR Results**")
-        snr_df = pd.DataFrame(list(snr_results.items()), columns=["Molecule", "SNR (σ)"])
-        st.dataframe(snr_df, key="snr_table")
-        st.download_button("Download SNR CSV", snr_df.to_csv(index=False).encode('utf-8'), file_name="snr.csv", key="snr_csv")
+        try:
+            smoothed, ref_wl, valid_mask, combined, bio_curves, snr_results = res["returns"]
+            # Spectrum
+            st.write("**Stacked Spectrum**")
+            df = pd.DataFrame({"Wavelength": ref_wl[valid_mask], "Flux": smoothed[valid_mask]})
+            st.dataframe(df.head(200), key="spectrum_table")
+            st.download_button("Download Spectrum CSV", df.to_csv(index=False).encode('utf-8'), file_name="spectrum.csv", key="spectrum_csv")
+            
+            # Biosignatures
+            st.write("**Biosignatures**")
+            bio_df = pd.DataFrame({"Wavelength": ref_wl[valid_mask], "Combined_Biosignatures": combined[valid_mask]})
+            for mol, curve in bio_curves.items():
+                bio_df[mol] = 1 + curve[valid_mask]
+            st.dataframe(bio_df.head(200), key="bio_table")
+            st.download_button("Download Biosignatures CSV", bio_df.to_csv(index=False).encode('utf-8'), file_name="biosignatures.csv", key="bio_csv")
+            
+            # SNR
+            st.write("**SNR Results**")
+            snr_df = pd.DataFrame(list(snr_results.items()), columns=["Molecule", "SNR (σ)"])
+            st.dataframe(snr_df, key="snr_table")
+            st.download_button("Download SNR CSV", snr_df.to_csv(index=False).encode('utf-8'), file_name="snr.csv", key="snr_csv")
+        except ValueError:
+            st.error("Unexpected return format from core.py. Expected (smoothed, ref_wl, valid_mask, combined, bio_curves, snr_results).")
     
     # Display generated files
     if res["files"]:
