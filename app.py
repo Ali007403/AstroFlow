@@ -8,59 +8,18 @@ Original file is located at
 """
 
 import streamlit as st
-import numpy as np
-import pandas as pd
 import tempfile
 import os
 import io
 import contextlib
 import matplotlib.pyplot as plt
-import plotly.graph_objects as go
+import pandas as pd
 from astroflow.core import analyze_all_fits
 
-st.set_page_config(page_title="AstroFlow", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="AstroFlow", layout="wide")
 
-# Helper functions
-def make_key(*parts):
-    return "_".join(str(p) for p in parts if p is not None).replace(" ", "_").replace(".", "_")[:200]
-
-DEFAULT_BANDS = {"H₂O": (1.35, 1.45), "CH₄": (1.60, 1.72), "CO₂": (2.65, 2.75), "DMS": (3.75, 3.85), "CO": (4.65, 4.75)}
-
-def smooth_flux(flux, window, polyorder):
-    if window % 2 == 0:
-        window += 1
-    if len(flux) >= window >= 3:
-        try:
-            from scipy.signal import savgol_filter
-            return savgol_filter(flux, window, polyorder)
-        except:
-            return flux
-    return flux
-
-def plotly_spectrum(wl, fl, fl_smooth=None, title="Spectrum", bands=None, show_bands=True):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=wl, y=fl, mode='lines', name='Raw', line=dict(color='rgba(0,150,200,0.7)')))
-    if fl_smooth is not None:
-        fig.add_trace(go.Scatter(x=wl, y=fl_smooth, mode='lines', name='Smoothed', line=dict(color='black', width=2)))
-    if show_bands and bands:
-        colors = ['skyblue', 'violet', 'lightgreen', 'gold', 'lightcoral']
-        for i, (mol, (a, b)) in enumerate(bands.items()):
-            fig.add_vrect(x0=a, x1=b, fillcolor=colors[i % len(colors)], opacity=0.25, layer="below", line_width=0, annotation_text=mol, annotation_position="top left")
-    fig.update_layout(title=title, xaxis_title="Wavelength (µm)", yaxis_title="Flux", template="plotly_white", height=420)
-    return fig
-
-# Sidebar controls
-st.sidebar.header("AstroFlow Controls")
-smoothing_enabled = st.sidebar.checkbox("Enable smoothing", value=True)
-smoothing_window = st.sidebar.slider("Smoothing window (odd)", 5, 501, 51, step=2)
-polyorder = st.sidebar.slider("Polyorder", 1, 5, 3)
-show_bands = st.sidebar.checkbox("Show molecular bands", value=True)
-show_snr = st.sidebar.checkbox("Show SNR", value=True)
-enable_downloads = st.sidebar.checkbox("Enable downloads", value=True)
-
-# Main UI
-st.title("🔭 AstroFlow")
-st.markdown("Upload FITS files to analyze spectra, biosignatures, and SNR.")
+st.title("AstroFlow")
+st.markdown("Upload FITS files to analyze spectra and biosignatures.")
 
 # File upload
 uploaded = st.file_uploader("Upload FITS files", type=["fits"], accept_multiple_files=True)
@@ -76,7 +35,7 @@ for up in uploaded:
     with open(dst, "wb") as f:
         f.write(up.read())
     file_paths.append(dst)
-st.success(f"Saved {len(file_paths)} files.")
+st.success(f"Saved {len(file_paths)} files: {[os.path.basename(p) for p in file_paths]}")
 
 # Run core and capture outputs
 def run_core_capture(paths):
@@ -97,9 +56,9 @@ def run_core_capture(paths):
     
     try:
         with contextlib.redirect_stdout(stdout_buf):
-            result["returns"] = analyze_all_fits()
+            result["returns"] = analyze_all_fits(file_paths=paths)
     except Exception as e:
-        st.error(f"Error in analyze_all_fits: {e}")
+        st.error(f"Error running analysis: {e}")
         result["prints"] = str(e)
     finally:
         plt.show = orig_show
@@ -110,73 +69,52 @@ def run_core_capture(paths):
     result["files"] = [os.path.join(work_dir, f) for f in (set(os.listdir(work_dir)) - before_files)]
     return result
 
-# Run core
-if st.button("Run Analysis on All Files"):
+# Run button
+if st.button("Run Analysis"):
     with st.spinner("Running analysis..."):
         res = run_core_capture(file_paths)
     
-    # Display prints
+    # Display logs
     if res["prints"].strip():
         st.subheader("Logs")
         st.code(res["prints"])
     
-    # Display figures
+    # Display plots
     if res["figs"]:
-        st.subheader("Plots from core.py")
+        st.subheader("Plots")
         for i, fig in enumerate(res["figs"]):
             try:
-                st.pyplot(fig, key=make_key("fig", i))
+                st.pyplot(fig, key=f"fig_{i}")
             except:
                 buf = io.BytesIO()
                 fig.savefig(buf, format='png', bbox_inches='tight')
                 buf.seek(0)
-                st.image(buf, caption=f"Figure {i}", use_column_width=True, key=make_key("fig_img", i))
+                st.image(buf, caption=f"Plot {i}", use_column_width=True, key=f"fig_img_{i}")
     
     # Display returned data
     if res["returns"]:
-        st.subheader("Returned Data")
+        st.subheader("Results")
         if isinstance(res["returns"], (list, tuple)) and len(res["returns"]) >= 3:
             smoothed, ref_wl, valid_mask, *extra = res["returns"]
-            # Spectrum plot
-            fl_smooth = smooth_flux(smoothed, smoothing_window, polyorder) if smoothing_enabled else None
-            fig = plotly_spectrum(ref_wl[valid_mask], smoothed[valid_mask], fl_smooth[valid_mask] if fl_smooth is not None else None,
-                                 title="Stacked Spectrum", bands=DEFAULT_BANDS, show_bands=show_bands)
-            st.plotly_chart(fig, use_container_width=True, key=make_key("spectrum_plot"))
+            st.write("**Stacked Spectrum**")
+            df = pd.DataFrame({"Wavelength": ref_wl[valid_mask], "Flux": smoothed[valid_mask]})
+            st.dataframe(df.head(200), key="spectrum_table")
+            st.download_button("Download Spectrum CSV", df.to_csv(index=False).encode('utf-8'), file_name="spectrum.csv", key="spectrum_csv")
             
-            # DataFrame for download
-            if enable_downloads:
-                df = pd.DataFrame({"Wavelength": ref_wl[valid_mask], "Flux": smoothed[valid_mask]})
-                if fl_smooth is not None:
-                    df["Smoothed_Flux"] = fl_smooth[valid_mask]
-                csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button("Download Spectrum CSV", csv, file_name="spectrum.csv", key=make_key("spectrum_csv"))
+            if extra and len(extra) >= 2:  # Biosignatures
+                combined, bio_curves = extra[:2]
+                st.write("**Biosignatures**")
+                bio_df = pd.DataFrame({"Wavelength": ref_wl[valid_mask], "Combined_Biosignatures": combined[valid_mask]})
+                for mol, curve in bio_curves.items():
+                    bio_df[mol] = 1 + curve[valid_mask]
+                st.dataframe(bio_df.head(200), key="bio_table")
+                st.download_button("Download Biosignatures CSV", bio_df.to_csv(index=False).encode('utf-8'), file_name="biosignatures.csv", key="bio_csv")
             
-            # Biosignatures or SNR
-            if extra:
-                if len(extra) >= 2:  # Biosignatures
-                    combined, bio_curves = extra[:2]
-                    st.subheader("Biosignatures")
-                    fig = plotly_spectrum(ref_wl[valid_mask], smoothed[valid_mask], title="Spectrum vs Biosignatures", bands=DEFAULT_BANDS, show_bands=show_bands)
-                    fig.add_trace(go.Scatter(x=ref_wl[valid_mask], y=combined[valid_mask], mode='lines', name='Biosignatures', line=dict(dash='dash', color='tomato')))
-                    for mol, curve in bio_curves.items():
-                        fig.add_trace(go.Scatter(x=ref_wl[valid_mask], y=1 + curve[valid_mask], mode='lines', name=mol))
-                    st.plotly_chart(fig, use_container_width=True, key=make_key("bio_plot"))
-                    
-                    if enable_downloads:
-                        bio_df = pd.DataFrame({"Wavelength": ref_wl[valid_mask], "Combined_Biosignatures": combined[valid_mask]})
-                        for mol, curve in bio_curves.items():
-                            bio_df[mol] = 1 + curve[valid_mask]
-                        csv = bio_df.to_csv(index=False).encode('utf-8')
-                        st.download_button("Download Biosignatures CSV", csv, file_name="biosignatures.csv", key=make_key("bio_csv"))
-                
-                if show_snr and len(extra) >= 1 and isinstance(extra[-1], dict):  # SNR
-                    st.subheader("SNR Results")
-                    snr_results = extra[-1]
-                    snr_df = pd.DataFrame(list(snr_results.items()), columns=["Molecule", "SNR (σ)"])
-                    st.dataframe(snr_df, key=make_key("snr_table"))
-                    if enable_downloads:
-                        csv = snr_df.to_csv(index=False).encode('utf-8')
-                        st.download_button("Download SNR CSV", csv, file_name="snr.csv", key=make_key("snr_csv"))
+            if extra and show_snr and isinstance(extra[-1], dict):  # SNR
+                st.write("**SNR Results**")
+                snr_df = pd.DataFrame(list(extra[-1].items()), columns=["Molecule", "SNR (σ)"])
+                st.dataframe(snr_df, key="snr_table")
+                st.download_button("Download SNR CSV", snr_df.to_csv(index=False).encode('utf-8'), file_name="snr.csv", key="snr_csv")
     
     # Display generated files
     if res["files"]:
@@ -186,57 +124,12 @@ if st.button("Run Analysis on All Files"):
             if fname.lower().endswith(".csv"):
                 try:
                     df = pd.read_csv(f)
-                    st.dataframe(df.head(200), key=make_key("csv", fname))
-                    if enable_downloads:
-                        st.download_button(f"Download {fname}", open(f, "rb").read(), file_name=fname, key=make_key("dl", fname))
+                    st.dataframe(df.head(200), key=f"csv_{fname}")
+                    st.download_button(f"Download {fname}", open(f, "rb").read(), file_name=fname, key=f"dl_{fname}")
                 except:
                     st.write(f"Failed to read {fname}")
             elif fname.lower().endswith((".png", ".jpg", ".jpeg")):
-                st.image(f, caption=fname, use_column_width=True, key=make_key("img", fname))
-                if enable_downloads:
-                    st.download_button(f"Download {fname}", open(f, "rb").read(), file_name=fname, key=make_key("dl", fname))
+                st.image(f, caption=fname, use_column_width=True, key=f"img_{fname}")
+                st.download_button(f"Download {fname}", open(f, "rb").read(), file_name=fname, key=f"dl_{fname}")
             else:
-                if enable_downloads:
-                    st.download_button(f"Download {fname}", open(f, "rb").read(), file_name=fname, key=make_key("dl", fname))
-
-# Per-file inspection
-st.header("Per-File Inspection")
-for idx, p in enumerate(file_paths):
-    fname = os.path.basename(p)
-    st.subheader(fname)
-    if st.checkbox("Inspect HDUs", key=make_key("inspect", fname, idx)):
-        try:
-            with fits.open(p, memmap=False) as hdul:
-                for h_i, hdu in enumerate(hdul):
-                    st.markdown(f"**HDU {h_i}** — {hdu.__class__.__name__}")
-                    st.write("Header:", {k: hdu.header[k] for k in list(hdu.header.keys())[:20]})
-                    if hasattr(hdu.data, 'names'):
-                        df = pd.DataFrame(hdu.data)
-                        st.dataframe(df.head(200), key=make_key("table", fname, h_i))
-                        if enable_downloads:
-                            csv = df.to_csv(index=False).encode('utf-8')
-                            st.download_button(f"Download HDU {h_i} Table", csv, file_name=f"{fname}_hdu{h_i}.csv", key=make_key("dl", fname, h_i, "table"))
-                    if getattr(hdu.data, "ndim", 0) == 2:
-                        fig, ax = plt.subplots(figsize=(6, 3))
-                        ax.imshow(hdu.data, origin='lower', cmap='gray', aspect='auto')
-                        ax.set_title(f"{fname} HDU {h_i} Image")
-                        st.pyplot(fig, key=make_key("img", fname, h_i))
-                        if enable_downloads:
-                            buf = io.BytesIO()
-                            fig.savefig(buf, format='png', bbox_inches='tight')
-                            buf.seek(0)
-                            st.download_button(f"Download HDU {h_i} Image", buf, file_name=f"{fname}_hdu{h_i}.png", key=make_key("dl", fname, h_i, "img"))
-                    wl, fl = try_extract_spectrum(hdu)
-                    if wl is not None:
-                        st.write(f"Spectrum: {len(wl)} points, range {wl.min():.5g}–{wl.max():.5g}")
-                        fl_smooth = smooth_flux(fl.copy(), smoothing_window, polyorder) if smoothing_enabled else None
-                        fig = plotly_spectrum(wl, fl, fl_smooth, title=f"{fname} HDU {h_i}", bands=DEFAULT_BANDS, show_bands=show_bands)
-                        st.plotly_chart(fig, use_container_width=True, key=make_key("plot", fname, h_i))
-                        if enable_downloads:
-                            df = pd.DataFrame({"Wavelength": wl, "Flux": fl})
-                            if fl_smooth is not None:
-                                df["Smoothed_Flux"] = fl_smooth
-                            csv = df.to_csv(index=False).encode('utf-8')
-                            st.download_button(f"Download HDU {h_i} Spectrum", csv, file_name=f"{fname}_hdu{h_i}_spectrum.csv", key=make_key("dl", fname, h_i, "spec"))
-        except Exception as e:
-            st.error(f"Failed to inspect {fname}: {e}")
+                st.download_button(f"Download {fname}", open(f, "rb").read(), file_name=fname, key=f"dl_{fname}")
