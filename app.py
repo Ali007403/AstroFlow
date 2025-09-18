@@ -12,15 +12,20 @@ import tempfile
 import os
 import io
 import contextlib
-import glob
 import matplotlib.pyplot as plt
 import pandas as pd
-from FitsFlow.core import analyze_all_fits
+import numpy as np
+from astropy.io import fits
+from scipy.signal import savgol_filter
 
 st.set_page_config(page_title="AstroFlow", layout="wide")
 
 st.title("AstroFlow")
 st.markdown("Upload FITS files to analyze spectra and biosignatures.")
+
+# Common column names for auto-detection
+WL_COLS = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WLEN']
+FLUX_COLS = ['FLUX', 'FLUX_DENSITY', 'SPECTRUM', 'INTENSITY']
 
 # File upload
 uploaded = st.file_uploader("Upload FITS files", type=["fits"], accept_multiple_files=True)
@@ -38,10 +43,10 @@ for up in uploaded:
     file_paths.append(dst)
 st.success(f"Saved {len(file_paths)} files: {[os.path.basename(p) for p in file_paths]}")
 
-# Run core and capture outputs
-def run_core_capture(temp_dir):
+# Analyze FITS files (embedded core.py logic)
+def analyze_all_fits(file_paths):
     result = {"prints": "", "figs": [], "files": []}
-    before_files = set(os.listdir(temp_dir))
+    before_files = set(os.listdir(work_dir))
     pre_figs = set(plt.get_fignums())
     captured_figs = []
     orig_show = plt.show
@@ -54,33 +59,173 @@ def run_core_capture(temp_dir):
             pass
     plt.show = fake_show
     stdout_buf = io.StringIO()
-    orig_glob = glob.glob
-    def patched_glob(pattern):
-        if '/content/*.fits' in pattern:
-            return [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.endswith('.fits')]
-        return orig_glob(pattern)
-    glob.glob = patched_glob
     
     try:
         with contextlib.redirect_stdout(stdout_buf):
-            analyze_all_fits()
-    except Exception as e:
-        st.error(f"Error running analysis: {e}")
-        result["prints"] = str(e)
-    finally:
-        plt.show = orig_show
-        glob.glob = orig_glob
+            print(f"Detected {len(file_paths)} FITS files: {file_paths}")
+            if not file_paths:
+                print("No FITS files provided.")
+                return result
+            
+            wavelengths_all, fluxes_all, headers = [], [], []
+            
+            for file_path in file_paths:
+                print(f"\n--- Analyzing {file_path} ---")
+                try:
+                    with fits.open(file_path) as hdul:
+                        hdul.info()  # Print HDU structure
+                        found_data = False
+                        
+                        for idx, hdu in enumerate(hdul):
+                            print(f"HDU {idx}: Type={hdu.header.get('XTENSION', 'PRIMARY')}, Shape={hdu.data.shape if hdu.data is not None else 'None'}")
+                            
+                            if hdu.data is None:
+                                print("  No data in this HDU.")
+                                continue
+                            
+                            if hasattr(hdu.data, 'names'):  # Table HDU
+                                print(f"  Table columns: {list(hdu.data.names)}")
+                                wl_col = next((col for col in WL_COLS if col in hdu.data.names), None)
+                                flux_col = next((col for col in FLUX_COLS if col in hdu.data.names), None)
+                                
+                                if wl_col and flux_col:
+                                    wl = np.array(hdu.data[wl_col]).flatten()
+                                    fl = np.array(hdu.data[flux_col]).flatten()
+                                    mask_valid = np.isfinite(wl) & np.isfinite(fl)
+                                    if np.any(mask_valid):
+                                        wl_valid, fl_valid = wl[mask_valid], fl[mask_valid]
+                                        wavelengths_all.append(wl_valid)
+                                        fluxes_all.append(fl_valid)
+                                        headers.append(hdu.header)
+                                        found_data = True
+                                        print(f"  Extracted {len(wl_valid)} valid points from '{wl_col}' vs '{flux_col}'")
+                                        # Quick plot for this data
+                                        plt.figure(figsize=(10, 6))
+                                        plt.plot(wl_valid, fl_valid, label=f"{wl_col} vs {flux_col}")
+                                        plt.title(f"{file_path} HDU {idx} Spectrum")
+                                        plt.xlabel(wl_col)
+                                        plt.ylabel(flux_col)
+                                        plt.legend()
+                                        plt.grid(True)
+                                        plt.show()
+                                else:
+                                    print("  No wl/flux columns; plotting first 3 columns.")
+                                    if hdu.data.names:
+                                        plt.figure(figsize=(10, 6))
+                                        for col in hdu.data.names[:3]:
+                                            plt.plot(hdu.data[col], label=col)
+                                        plt.title(f"{file_path} HDU {idx} Columns")
+                                        plt.legend()
+                                        plt.show()
+                            else:  # Image HDU
+                                data = hdu.data
+                                print(f"  Image data shape: {data.shape}")
+                                if data.ndim == 1:
+                                    plt.figure(figsize=(10, 6))
+                                    plt.plot(data, label='1D Data')
+                                    plt.title(f"{file_path} HDU {idx} 1D Image")
+                                    plt.legend()
+                                    plt.show()
+                                elif data.ndim == 2:
+                                    plt.figure(figsize=(10, 6))
+                                    plt.imshow(data, cmap='gray', aspect='auto')
+                                    plt.title(f"{file_path} HDU {idx} 2D Image")
+                                    plt.colorbar()
+                                    plt.show()
+                                found_data = True
+                            
+                            if not found_data:
+                                print(f"  No plottable data in {file_path}")
+                
+                except Exception as e:
+                    print(f"Error processing {file_path}: {e}")
+            
+            if wavelengths_all:
+                print(f"\nFound wl/flux in {len(wavelengths_all)} datasets; stacking...")
+                min_wl = min(min(wl) for wl in wavelengths_all)
+                max_wl = max(max(wl) for wl in wavelengths_all)
+                ref_wl = np.linspace(min_wl, max_wl, 2000)
+                interpolated_fluxes = [np.interp(ref_wl, wl, fl) for wl, fl in zip(wavelengths_all, fluxes_all)]
+                stacked_flux = np.nanmean(interpolated_fluxes, axis=0)
+                flux_norm = (stacked_flux - np.nanmin(stacked_flux)) / (np.nanmax(stacked_flux) - np.nanmin(stacked_flux))
+                stacked_smoothed = savgol_filter(flux_norm, 51, 3)
+                
+                # Biosignature simulation
+                def gaussian(x, mu, sigma, amp):
+                    return -amp * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+                bio_curves = {
+                    'H₂O': gaussian(ref_wl, 1.4, 0.05, 0.01),
+                    'CH₄': gaussian(ref_wl, 1.66, 0.06, 0.008),
+                    'CO₂': gaussian(ref_wl, 2.7, 0.05, 0.007),
+                    'DMS': gaussian(ref_wl, 3.8, 0.02, 0.001),
+                    'CO':  gaussian(ref_wl, 4.7, 0.07, 0.006)
+                }
+                combined = 1 + sum(bio_curves.values())
+                
+                # Plot stacked spectrum vs biosignatures
+                plt.figure(figsize=(14, 6))
+                plt.plot(ref_wl, stacked_smoothed, label='Stacked Smoothed Spectrum', color='black', linewidth=1.5)
+                plt.plot(ref_wl, combined, label='Simulated Biosignatures', linestyle='--', color='tomato')
+                colors = ['skyblue', 'violet', 'lightgreen', 'gold', 'lightcoral']
+                bands = [(1.35, 1.45), (1.60, 1.72), (2.65, 2.75), (3.75, 3.85), (4.65, 4.75)]
+                for i, (start, end) in enumerate(bands):
+                    plt.axvspan(start, end, color=colors[i], alpha=0.25, label=list(bio_curves.keys())[i])
+                plt.title("Stacked Spectrum vs Biosignatures")
+                plt.xlabel("Wavelength (µm)")
+                plt.ylabel("Normalized Flux")
+                plt.grid(True)
+                plt.legend()
+                plt.tight_layout()
+                plt.show()
+                
+                # SNR calculation
+                def calc_snr(wl_range):
+                    mask = (ref_wl >= wl_range[0]) & (ref_wl <= wl_range[1])
+                    signal = 1 - np.mean(stacked_smoothed[mask]) if np.any(mask) else 0
+                    noise_mask = (((ref_wl >= wl_range[0] - 0.3) & (ref_wl <= wl_range[0] - 0.1)) |
+                                  ((ref_wl >= wl_range[1] + 0.1) & (ref_wl <= wl_range[1] + 0.3)))
+                    noise = np.std(stacked_smoothed[noise_mask]) if np.any(noise_mask) else 1e-10
+                    return signal / noise if noise > 0 else 0
+                
+                print("\n📊 SNR for Biosignature Bands:")
+                total_score = 0
+                snr_results = {}
+                for molecule, rng in {'H₂O': (1.35, 1.45), 'CH₄': (1.60, 1.72), 'CO₂': (2.65, 2.75), 'DMS': (3.75, 3.85), 'CO': (4.65, 4.75)}.items():
+                    snr = calc_snr(rng)
+                    snr_results[molecule] = snr
+                    print(f"{molecule}: SNR = {snr:.2f}σ")
+                    total_score += snr
+                print(f"Combined σ: ~{total_score:.2f}σ")
+                
+                # Save spectrum and SNR as CSVs
+                spectrum_df = pd.DataFrame({"Wavelength": ref_wl, "Flux": stacked_smoothed})
+                spectrum_csv = os.path.join(work_dir, "spectrum.csv")
+                spectrum_df.to_csv(spectrum_csv, index=False)
+                
+                bio_df = pd.DataFrame({"Wavelength": ref_wl, "Combined_Biosignatures": combined})
+                for mol, curve in bio_curves.items():
+                    bio_df[mol] = 1 + curve
+                bio_csv = os.path.join(work_dir, "biosignatures.csv")
+                bio_df.to_csv(bio_csv, index=False)
+                
+                snr_df = pd.DataFrame(list(snr_results.items()), columns=["Molecule", "SNR (σ)"])
+                snr_csv = os.path.join(work_dir, "snr.csv")
+                snr_df.to_csv(snr_csv, index=False)
+                
+        except Exception as e:
+            print(f"Error during analysis: {e}")
     
     result["prints"] = stdout_buf.getvalue()
     post_figs = set(plt.get_fignums())
     result["figs"] = captured_figs + [plt.figure(n) for n in (post_figs - pre_figs)]
-    result["files"] = [os.path.join(temp_dir, f) for f in (set(os.listdir(temp_dir)) - before_files)]
+    result["files"] = [os.path.join(work_dir, f) for f in (set(os.listdir(work_dir)) - before_files)]
+    plt.show = orig_show
     return result
 
 # Run button
 if st.button("Run Analysis"):
     with st.spinner("Running analysis..."):
-        res = run_core_capture(work_dir)
+        res = analyze_all_fits(file_paths)
     
     # Display logs
     if res["prints"].strip():
@@ -92,15 +237,14 @@ if st.button("Run Analysis"):
         st.subheader("Plots")
         for i, fig in enumerate(res["figs"]):
             try:
-                st.pyplot(fig, key=f"fig_{i}")
+                st.pyplot(fig)
             except Exception as e:
                 try:
                     buf = io.BytesIO()
                     fig.savefig(buf, format='png', bbox_inches='tight')
                     buf.seek(0)
-                    st.image(buf.getvalue(), caption=f"Plot {i}", use_column_width=True, key=f"fig_img_{i}")
-                    if buf.getvalue():
-                        st.download_button(f"Download Plot {i}.png", buf.getvalue(), file_name=f"plot_{i}.png", key=f"dl_fig_{i}")
+                    st.image(buf.getvalue(), caption=f"Plot {i}", use_column_width=True)
+                    st.download_button(f"Download Plot {i}.png", buf.getvalue(), file_name=f"plot_{i}.png")
                 except Exception as e2:
                     st.write(f"Failed to display or save plot {i}: {e2}")
     
@@ -113,17 +257,17 @@ if st.button("Run Analysis"):
                 if fname.lower().endswith(".csv"):
                     df = pd.read_csv(f)
                     st.write(f"**{fname}** (CSV)")
-                    st.dataframe(df.head(200), key=f"csv_{fname}")
+                    st.dataframe(df.head(200))
                     with open(f, "rb") as file:
-                        st.download_button(f"Download {fname}", file.read(), file_name=fname, key=f"dl_{fname}")
+                        st.download_button(f"Download {fname}", file.read(), file_name=fname)
                 elif fname.lower().endswith((".png", ".jpg", ".jpeg")):
                     st.write(f"**{fname}** (Image)")
-                    st.image(f, caption=fname, use_column_width=True, key=f"img_{fname}")
+                    st.image(f, caption=fname, use_column_width=True)
                     with open(f, "rb") as file:
-                        st.download_button(f"Download {fname}", file.read(), file_name=fname, key=f"dl_{fname}")
+                        st.download_button(f"Download {fname}", file.read(), file_name=fname)
                 else:
                     st.write(f"**{fname}** (Other)")
                     with open(f, "rb") as file:
-                        st.download_button(f"Download {fname}", file.read(), file_name=fname, key=f"dl_{fname}")
+                        st.download_button(f"Download {fname}", file.read(), file_name=fname)
             except Exception as e:
                 st.write(f"Failed to process {fname}: {e}")
