@@ -40,7 +40,7 @@ st.success(f"Saved {len(file_paths)} files: {[os.path.basename(p) for p in file_
 
 # Run core and capture outputs
 def run_core_capture(temp_dir):
-    result = {"prints": "", "figs": [], "files": [], "returns": None}
+    result = {"prints": "", "figs": [], "files": []}
     before_files = set(os.listdir(temp_dir))
     pre_figs = set(plt.get_fignums())
     captured_figs = []
@@ -93,26 +93,37 @@ if st.button("Run Analysis"):
         for i, fig in enumerate(res["figs"]):
             try:
                 st.pyplot(fig, key=f"fig_{i}")
-            except:
-                buf = io.BytesIO()
-                fig.savefig(buf, format='png', bbox_inches='tight')
-                buf.seek(0)
-                st.image(buf, caption=f"Plot {i}", use_column_width=True, key=f"fig_img_{i}")
+            except Exception as e:
+                try:
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format='png', bbox_inches='tight')
+                    buf.seek(0)
+                    st.image(buf.getvalue(), caption=f"Plot {i}", use_column_width=True, key=f"fig_img_{i}")
+                    if buf.getvalue():
+                        st.download_button(f"Download Plot {i}.png", buf.getvalue(), file_name=f"plot_{i}.png", key=f"dl_fig_{i}")
+                except Exception as e2:
+                    st.write(f"Failed to display or save plot {i}: {e2}")
     
     # Display generated files
     if res["files"]:
         st.subheader("Generated Files")
         for f in res["files"]:
             fname = os.path.basename(f)
-            if fname.lower().endswith(".csv"):
-                try:
+            try:
+                if fname.lower().endswith(".csv"):
                     df = pd.read_csv(f)
+                    st.write(f"**{fname}** (CSV)")
                     st.dataframe(df.head(200), key=f"csv_{fname}")
-                    st.download_button(f"Download {fname}", open(f, "rb").read(), file_name=fname, key=f"dl_{fname}")
-                except:
-                    st.write(f"Failed to read {fname}")
-            elif fname.lower().endswith((".png", ".jpg", ".jpeg")):
-                st.image(f, caption=fname, use_column_width=True, key=f"img_{fname}")
-                st.download_button(f"Download {fname}", open(f, "rb").read(), file_name=fname, key=f"dl_{fname}")
-            else:
-                st.download_button(f"Download {fname}", open(f, "rb").read(), file_name=fname, key=f"dl_{fname}")
+                    with open(f, "rb") as file:
+                        st.download_button(f"Download {fname}", file.read(), file_name=fname, key=f"dl_{fname}")
+                elif fname.lower().endswith((".png", ".jpg", ".jpeg")):
+                    st.write(f"**{fname}** (Image)")
+                    st.image(f, caption=fname, use_column_width=True, key=f"img_{fname}")
+                    with open(f, "rb") as file:
+                        st.download_button(f"Download {fname}", file.read(), file_name=fname, key=f"dl_{fname}")
+                else:
+                    st.write(f"**{fname}** (Other)")
+                    with open(f, "rb") as file:
+                        st.download_button(f"Download {fname}", file.read(), file_name=fname, key=f"dl_{fname}")
+            except Exception as e:
+                st.write(f"Failed to process {fname}: {e}")
