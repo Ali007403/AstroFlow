@@ -8,25 +8,60 @@ Original file is located at
 """
 
 import streamlit as st
-import tempfile
-import os
-from FitsFlow import core
+from fitsflow import core   # assumes your folder is fitsflow/ and has core.py
+import matplotlib.pyplot as plt
 
-st.title("FitsFlow: Automated FITS Analyzer")
-st.write("Upload FITS files to analyze spectra, stack signals, and simulate biosignatures.")
+# ----------------- Page Config -----------------
+st.set_page_config(
+    page_title="AstroFlow - FITS Analysis",
+    page_icon="✨",
+    layout="wide"
+)
 
-uploaded_files = st.file_uploader("Upload FITS files", type=["fits"], accept_multiple_files=True)
+st.title("🔭 AstroFlow")
+st.markdown("Upload your **FITS files** and run quick spectral analysis right in the browser.")
+
+# Sidebar
+st.sidebar.header("⚙️ Settings")
+smooth_factor = st.sidebar.slider("Smoothing Factor", 1, 50, 10)
+normalize = st.sidebar.checkbox("Normalize Spectrum", value=True)
+
+# File uploader
+uploaded_files = st.file_uploader(
+    "Upload one or more FITS files:",
+    type=["fits"],
+    accept_multiple_files=True
+)
 
 if uploaded_files:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        file_paths = []
-        for f in uploaded_files:
-            path = os.path.join(tmpdir, f.name)
-            with open(path, "wb") as out:
-                out.write(f.read())
-            file_paths.append(path)
+    st.success(f"{len(uploaded_files)} file(s) uploaded successfully ✅")
 
-        st.success(f"Uploaded {len(file_paths)} files. Running analysis...")
-        core.analyze_all_fits()  # this runs your core.py script
+    results = []
+
+    for file in uploaded_files:
+        with st.spinner(f"Processing {file.name}..."):
+            try:
+                # Run your analysis function from core.py
+                spectrum = core.analyze_fits(file, smooth=smooth_factor, normalize=normalize)
+
+                # Plot results
+                fig, ax = plt.subplots()
+                ax.plot(spectrum['wavelength'], spectrum['flux'], color="cyan")
+                ax.set_title(f"Spectrum - {file.name}")
+                ax.set_xlabel("Wavelength")
+                ax.set_ylabel("Flux")
+
+                st.pyplot(fig)
+                results.append(spectrum)
+
+            except Exception as e:
+                st.error(f"Error processing {file.name}: {e}")
+
+    st.success("✅ Analysis complete!")
+
 else:
-    st.info("Please upload one or more FITS files to begin.")
+    st.info("⬆️ Upload FITS files to begin analysis.")
+
+# Footer
+st.markdown("---")
+st.caption("Built with ❤️ by AstroFlow | Prototype for NASA Space Apps 🚀")
