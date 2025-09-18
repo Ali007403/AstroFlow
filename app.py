@@ -40,26 +40,101 @@ for up in uploaded:
     file_paths.append(dst)
 st.success(f"Saved {len(file_paths)} files: {[os.path.basename(p) for p in file_paths]}")
 
-# Analyze FITS files (embedded core.py logic)
-def analyze_all_fits():
+def analyze_all_fits(downsample=1000, make_plots=True):
     result = {"prints": "", "figs": [], "files": []}
     before_files = set(os.listdir(work_dir))
     stdout_buf = io.StringIO()
-    orig_glob = glob.glob
-    def patched_glob(pattern):
-        if '/content/*.fits' in pattern:
-            return [os.path.join(work_dir, f) for f in os.listdir(work_dir) if f.endswith('.fits')]
-        return orig_glob(pattern)
-    glob.glob = patched_glob
-    
+
     try:
         with contextlib.redirect_stdout(stdout_buf):
-            print(f"Detected {len(file_paths)} FITS files: {file_paths}")
             if not file_paths:
                 print("No FITS files provided.")
                 return result
-            
+
             wavelengths_all, fluxes_all = [], []
+
+            for file_path in file_paths:
+                print(f"\n--- Analyzing {file_path} ---")
+                try:
+                    with fits.open(file_path, memmap=False) as hdul:
+                        for idx, hdu in enumerate(hdul):
+                            if hdu.data is None:
+                                continue
+
+                            if hasattr(hdu.data, "names"):  # Table HDU
+                                wl_col = next((c for c in hdu.data.names if c.upper() in ["WAVELENGTH", "WAVE", "LAMBDA", "WLEN"]), None)
+                                fl_col = next((c for c in hdu.data.names if c.upper() in ["FLUX", "FLUX_DENSITY", "SPECTRUM", "INTENSITY"]), None)
+
+                                if wl_col and fl_col:
+                                    wl = np.asarray(hdu.data[wl_col]).flatten()
+                                    fl = np.asarray(hdu.data[fl_col]).flatten()
+                                    mask = np.isfinite(wl) & np.isfinite(fl)
+                                    wl, fl = wl[mask], fl[mask]
+
+                                    if len(wl) > 0:
+                                        wavelengths_all.append(wl)
+                                        fluxes_all.append(fl)
+
+                                        if make_plots:
+                                            fig, ax = plt.subplots(figsize=(8, 5))
+                                            ax.plot(wl, fl, lw=0.7)
+                                            ax.set_title(f"{os.path.basename(file_path)} HDU {idx}")
+                                            ax.set_xlabel("Wavelength")
+                                            ax.set_ylabel("Flux")
+                                            buf = io.BytesIO()
+                                            fig.savefig(buf, format="png", bbox_inches="tight")
+                                            buf.seek(0)
+                                            result["figs"].append(buf.getvalue())
+                                            plt.close(fig)
+
+                except Exception as e:
+                    print(f"Error processing {file_path}: {e}")
+
+            if not wavelengths_all:
+                print("No valid spectra found.")
+                return result
+
+            # Stack spectra (resample all to common grid)
+            min_wl = max(min(min(w) for w in wavelengths_all), 0.1)  # prevent negative ranges
+            max_wl = min(max(max(w) for w in wavelengths_all), 5.0)  # cut at ~5µm
+            ref_wl = np.linspace(min_wl, max_wl, downsample)
+
+            interp_fluxes = [np.interp(ref_wl, wl, fl, left=np.nan, right=np.nan) for wl, fl in zip(wavelengths_all, fluxes_all)]
+            stacked_flux = np.nanmean(interp_fluxes, axis=0)
+
+            # Normalize + smooth
+            stacked_flux = (stacked_flux - np.nanmin(stacked_flux)) / (np.nanmax(stacked_flux) - np.nanmin(stacked_flux))
+            stacked_smoothed = savgol_filter(stacked_flux, 31, 3)
+
+            if make_plots:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.plot(ref_wl, stacked_smoothed, c="black", lw=1.2, label="Stacked Smoothed")
+                ax.set_title("Stacked Spectrum")
+                ax.set_xlabel("Wavelength (µm)")
+                ax.set_ylabel("Normalized Flux")
+                ax.grid(True)
+                ax.legend()
+                buf = io.BytesIO()
+                fig.savefig(buf, format="png", bbox_inches="tight")
+                buf.seek(0)
+                result["figs"].append(buf.getvalue())
+                plt.close(fig)
+
+            # Save CSV
+            spectrum_df = pd.DataFrame({"Wavelength": ref_wl, "Flux": stacked_smoothed})
+            spec_csv = os.path.join(work_dir, "stacked_spectrum.csv")
+            spectrum_df.to_csv(spec_csv, index=False)
+            result["files"].append(spec_csv)
+
+            # Cleanup
+            del wavelengths_all, fluxes_all, interp_fluxes, stacked_flux, stacked_smoothed
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+    result["prints"] = stdout_buf.getvalue()
+    return result
+
             # Common column names for auto-detection
             WL_COLS = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WLEN']
             FLUX_COLS = ['FLUX', 'FLUX_DENSITY', 'SPECTRUM', 'INTENSITY']
