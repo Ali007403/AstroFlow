@@ -7,27 +7,31 @@ Original file is located at
     https://colab.research.google.com/drive/1mgiCPWeh9yxe09QNeIY_QDEtRJBJHcgX
 """
 
-# app.py — Capture everything core.py produces (prints, matplotlib figures, saved files, returned objects)
+# app.py — runs fitsflow.core and captures everything it prints/plots/saves
 import streamlit as st
 import numpy as np
-import pandas as pd
-import tempfile, os, io, time, sys, re, contextlib
-import matplotlib.pyplot as plt
 from astropy.io import fits
 from scipy.signal import savgol_filter
-from typing import Tuple
+import pandas as pd
+import tempfile, os, io, time, re, sys
+import matplotlib.pyplot as plt
 import plotly.graph_objects as go
+from typing import Tuple
+import contextlib
 
-st.set_page_config(page_title="AstroFlow · Capture Core Outputs", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="AstroFlow · Core-invoker", layout="wide", initial_sidebar_state="expanded")
 
-# ---------- helpers ----------
+# -------------------------
+# helpers
+# -------------------------
 def make_key(*parts):
     raw = "_".join(str(p) for p in parts if p is not None)
-    return re.sub(r'\W+', '_', raw).strip('_')[:200]
+    key = re.sub(r'\W+', '_', raw).strip('_')
+    return key[:180]
 
 WL_COLS = ['WAVELENGTH','WAVE','LAMBDA','WLEN','LAMBDA_MICRON','LAMBDA_UM','WAVELENGTH_MICRON']
 FLUX_COLS = ['FLUX','FLUX_DENSITY','SPECTRUM','INTENSITY','FLUX_1','FLUX_0']
-DEFAULT_BANDS = {"H2O": (1.35, 1.45), "CH4": (1.60,1.72), "CO2": (2.65,2.75)}
+DEFAULT_BANDS = {"H2O": (1.35,1.45),"CH4": (1.60,1.72),"CO2": (2.65,2.75)}
 
 def safe_names(arr):
     try:
@@ -39,7 +43,7 @@ def try_extract_spectrum(hdu):
     data = hdu.data
     if data is None:
         return None, None
-    if hasattr(data, 'names'):
+    if hasattr(data,'names'):
         names = safe_names(data)
         wl_col = next((c for c in WL_COLS if c in names), None)
         fl_col = next((c for c in FLUX_COLS if c in names), None)
@@ -48,385 +52,310 @@ def try_extract_spectrum(hdu):
             fl = np.array(data[fl_col]).astype(float).flatten()
             mask = np.isfinite(wl) & np.isfinite(fl)
             return wl[mask], fl[mask]
-        # fallback numeric cols
+        # fallback:
         nums = [n for n in names if np.issubdtype(data[n].dtype, np.number)]
-        if len(nums) >= 2:
+        if len(nums)>=2:
             wl = np.array(data[nums[0]]).astype(float).flatten()
             fl = np.array(data[nums[1]]).astype(float).flatten()
-            mask = np.isfinite(wl) & np.isfinite(fl)
+            mask = np.isfinite(wl)&np.isfinite(fl)
             return wl[mask], fl[mask]
     try:
         arr = np.array(data)
-        if arr.ndim == 1:
-            wl = np.arange(arr.size); fl = arr.astype(float); mask = np.isfinite(fl); return wl[mask], fl[mask]
-        elif arr.ndim == 2:
-            fl = np.nanmean(arr, axis=0)
-            wl = np.arange(fl.size); mask = np.isfinite(fl); return wl[mask], fl[mask]
+        if arr.ndim==1:
+            wl = np.arange(arr.size)
+            fl = arr.astype(float)
+            mask = np.isfinite(fl)
+            return wl[mask], fl[mask]
+        elif arr.ndim==2:
+            fl = np.nanmean(arr,axis=0)
+            wl = np.arange(fl.size)
+            mask = np.isfinite(fl)
+            return wl[mask], fl[mask]
     except Exception:
         pass
     return None, None
 
-def smooth_flux(flux, window, polyorder):
-    if window % 2 == 0:
-        window += 1
-    if len(flux) >= window and window >= 3:
+def plot_matplotlib_figures(captured_figs):
+    # show any matplotlib Figure objects
+    for idx, fig in enumerate(captured_figs):
         try:
-            return savgol_filter(flux, window, polyorder)
+            st.pyplot(fig)
         except Exception:
-            return flux
-    return flux
+            # final fallback: save to PNG and show
+            buf = io.BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight')
+            buf.seek(0)
+            st.image(buf)
 
-def calc_snr_on_band(ref_wl, ref_flux, band_range: Tuple[float,float]):
-    start, end = band_range
-    mask = (ref_wl >= start) & (ref_wl <= end)
-    if not np.any(mask):
-        return 0.0
-    signal = abs(1 - np.nanmean(ref_flux[mask]))
-    left_mask = (ref_wl >= (start - 0.3)) & (ref_wl <= (start - 0.1))
-    right_mask = (ref_wl >= (end + 0.1)) & (ref_wl <= (end + 0.3))
-    noise_vals = []
-    if np.any(left_mask): noise_vals.append(np.nanstd(ref_flux[left_mask]))
-    if np.any(right_mask): noise_vals.append(np.nanstd(ref_flux[right_mask]))
-    noise = np.nanmean(noise_vals) if noise_vals else np.nanstd(ref_flux)
-    if noise == 0 or np.isnan(noise): return 0.0
-    return float(signal / noise)
-
-def plotly_spectrum(wl, fl, fl_smooth=None, err=None, title="Spectrum", bands=None, show_bands=True, show_error=False):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=wl, y=fl, mode='lines', name='raw', line=dict(color='rgba(0,150,200,0.7)')))
-    if fl_smooth is not None:
-        fig.add_trace(go.Scatter(x=wl, y=fl_smooth, mode='lines', name='smoothed', line=dict(color='black', width=2)))
-    if show_error and err is not None:
-        try:
-            fig.add_trace(go.Scatter(x=wl, y=fl, mode='lines', name='raw_with_error',
-                                     error_y=dict(type='data', array=err, visible=True), line=dict(color='rgba(0,150,200,0.4)')))
-        except Exception:
-            fig.add_trace(go.Scatter(x=wl, y=fl+err, mode='lines', showlegend=False, opacity=0.2))
-            fig.add_trace(go.Scatter(x=wl, y=fl-err, mode='lines', showlegend=False, opacity=0.2))
-    if show_bands and bands:
-        for mol,(a,b) in bands.items():
-            fig.add_vrect(x0=a, x1=b, fillcolor="LightSkyBlue", opacity=0.25, layer="below", line_width=0, annotation_text=mol, annotation_position="top left")
-    fig.update_layout(title=title, xaxis_title="Wavelength", yaxis_title="Flux", template="plotly_white", height=420)
-    return fig
-
-# ---------- Try import core ----------
+# -------------------------
+# Try import user's core module
+# -------------------------
 core = None
-core_msg = ""
+core_import_msg = ""
 try:
     import fitsflow.core as core
-    core_msg = "Imported fitsflow.core"
+    core_import_msg = "Imported fitsflow.core successfully."
 except Exception as e:
     core = None
-    core_msg = f"fitsflow.core not importable: {e}"
+    core_import_msg = f"fitsflow.core not importable: {e}"
 
-# ---------- Sidebar UI (user toggles) ----------
+# -------------------------
+# Sidebar UI
+# -------------------------
 st.sidebar.header("AstroFlow Controls")
-st.sidebar.write(core_msg)
-smoothing_enabled = st.sidebar.checkbox("Enable smoothing", value=True)
+st.sidebar.write(core_import_msg)
+smoothing_enabled = st.sidebar.checkbox("Enable smoothing (app-level)", value=True)
 smoothing_window = st.sidebar.slider("Smoothing window (odd)", 5, 501, 51, step=2)
 polyorder = st.sidebar.slider("SavGol polyorder", 1, 5, 3)
-stack_enabled = st.sidebar.checkbox("Enable stacking (multi-file)", value=True)
-stack_method = st.sidebar.selectbox("Stack method", ["mean","median"], index=0)
-show_bands = st.sidebar.checkbox("Show molecular bands (single toggle)", value=True)
+show_bands = st.sidebar.checkbox("Show molecular bands (H2O/CH4/CO2)", value=True)
 show_snr = st.sidebar.checkbox("Show SNR (approx)", value=False)
-show_errorbars = st.sidebar.checkbox("Show error bars (if present)", value=False)
-raw_only = st.sidebar.checkbox("Raw-only (no smoothing/stacking overlays)", value=False)
 enable_downloads = st.sidebar.checkbox("Enable downloads", value=True)
-st.sidebar.markdown("---")
-st.sidebar.caption("AstroFlow · Capture ALL outputs from fitsflow.core")
+st.sidebar.caption("This UI will run your fitsflow.core code and capture outputs.")
 
-# ---------- Upload ----------
-st.title("🔭 AstroFlow — Capture ALL outputs from your core.py")
-st.markdown("Upload files and click **Run core** to execute your `fitsflow.core` logic. The UI will capture printed logs, matplotlib figures, returned values, and any created files in the working dir.")
+# -------------------------
+# Upload files
+# -------------------------
+st.title("🔭 AstroFlow — Run your core.py and capture ALL outputs")
+st.markdown("Upload FITS files and use the 'Run core' buttons to execute your local `fitsflow/core.py` logic. The app will capture printed output, matplotlib figures (plt.show()), and any files your code saves in the working temp dir.")
 
-uploaded = st.file_uploader("Upload FITS/CSV files (multiple allowed)", type=["fits","csv"], accept_multiple_files=True)
+uploaded = st.file_uploader("Upload FITS files (or CSV)", type=["fits","csv"], accept_multiple_files=True)
 if not uploaded:
-    st.info("Upload files to begin.")
+    st.info("Upload files to begin. The app will call functions in fitsflow.core if available.")
     st.stop()
 
-# save to controlled working dir
-work_dir = tempfile.mkdtemp(prefix="astroflow_")
+# Save uploaded to a temp working directory we control
+work_dir = tempfile.mkdtemp()
 file_paths = []
 for up in uploaded:
     dst = os.path.join(work_dir, up.name)
     with open(dst, "wb") as f:
         f.write(up.read())
     file_paths.append(dst)
-st.success(f"Saved {len(file_paths)} files to working dir: {work_dir}")
 
-# ---------- Runtime capture function ----------
+st.success(f"Saved {len(file_paths)} file(s) to working dir: {work_dir}")
+
+# Build quick per-file UI and attempt to extract HDU metadata (for transparency)
+st.header("Files uploaded")
+for p in file_paths:
+    st.write("- " + os.path.basename(p))
+
+# -------------------------
+# Core-run helpers: capture stdout + plt.show()
+# -------------------------
 import matplotlib
 from types import SimpleNamespace
-def run_core_capture(paths):
+
+def run_core_and_capture(file_paths_list):
     """
-    Run core functions in several ways and capture:
-      - stdout prints
-      - matplotlib figures (created or shown)
-      - files created in work_dir
-      - returned objects (if any)
-    Returns dict with keys: prints (str), figs (list of Figure), files (list of paths), returns (object or None)
+    Run fitsflow.core on the given paths (best-effort). Captures:
+    - stdout printed text
+    - matplotlib figures emitted via plt.show()
+    - any newly created files in the work_dir (csv/png/etc)
+    - return dict with keys: prints (str), figs (list of Figure), saved_files (list)
     """
-    result = {"prints": "", "figs": [], "files": [], "returns": None}
-    before_files = set(os.listdir(work_dir))
-    # prepare matplotlib detection
-    pre_figs = set(plt.get_fignums())
-    captured_via_show = []
-    orig_show = plt.show
-    def fake_show(*a, **kw):
-        try:
-            fig = plt.gcf()
-            captured_via_show.append(fig)
-            plt.close(fig)
-        except Exception:
-            pass
-    plt.show = fake_show
+    out = {"prints": "", "figs": [], "saved_files": []}
+    # snapshot existing files in working dir
+    before = set(os.listdir(work_dir))
 
     # capture stdout
     stdout_buf = io.StringIO()
-    ret_obj = None
+    # capture matplotlib.show calls by monkeypatching plt.show
+    captured_figs = []
+
+    orig_show = plt.show
+    def fake_show(*args, **kwargs):
+        # grab current figure(s) and append copies
+        fig = plt.gcf()
+        try:
+            # we copy the figure by saving to buffer and reloading to a new Figure if needed,
+            # but simplest: append existing fig and then close it
+            captured_figs.append(fig)
+            plt.close(fig)
+        except Exception:
+            pass
+
+    plt.show = fake_show
+
     try:
         with contextlib.redirect_stdout(stdout_buf):
+            # Many variants of core exist — try common function names:
+            # 1) analyze_all_fits(paths) or analyze_all_fits() — try to call with list first
+            called = False
             if core is not None:
-                # try reasonable function names / signatures
-                called = False
-                # 1) analyze_file or analyze_fits (per file)
-                if hasattr(core, "analyze_file"):
-                    for p in paths:
-                        try:
-                            r = core.analyze_file(p)
-                            # collect last return if any
-                            ret_obj = r
-                        except Exception as e:
-                            print(f"analyze_file failed for {p}: {e}")
-                    called = True
-                # 2) analyze_all_fits: try passing list, then no args
-                if not called and hasattr(core, "analyze_all_fits"):
+                # try analyze_all_fits
+                if hasattr(core, "analyze_all_fits"):
                     try:
-                        r = core.analyze_all_fits(paths)
-                        ret_obj = r
+                        # first try passing paths
+                        try:
+                            core.analyze_all_fits(file_paths_list)
+                        except TypeError:
+                            # maybe expects no args
+                            core.analyze_all_fits()
                         called = True
-                    except TypeError:
+                    except Exception:
+                        # swallow, we'll try other funcs
+                        pass
+                # try analyze_file or analyze_fits
+                if not called and hasattr(core, "analyze_file"):
+                    for fp in file_paths_list:
                         try:
-                            r = core.analyze_all_fits()
-                            ret_obj = r
-                            called = True
-                        except Exception as e:
-                            print("analyze_all_fits invocation failed:", e)
-                    except Exception as e:
-                        print("analyze_all_fits failed:", e)
-                # 3) process_file / process
-                if not called and hasattr(core, "process_file"):
-                    for p in paths:
-                        try:
-                            r = core.process_file(p)
-                            ret_obj = r
-                        except Exception as e:
-                            print("process_file failed for", p, e)
+                            core.analyze_file(fp)
+                        except Exception:
+                            pass
                     called = True
-                # 4) main() generic
+                if not called and hasattr(core, "process_file"):
+                    for fp in file_paths_list:
+                        try:
+                            core.process_file(fp)
+                        except Exception:
+                            pass
+                    called = True
+                # as a last resort, try main() if present
                 if not called and hasattr(core, "main"):
                     try:
-                        r = core.main(paths)
-                        ret_obj = r
+                        core.main(file_paths_list)
                         called = True
-                    except TypeError:
+                    except Exception:
                         try:
-                            r = core.main()
-                            ret_obj = r
+                            core.main()
                             called = True
-                        except Exception as e:
-                            print("core.main failed:", e)
-                if not called:
-                    print("No known entrypoint found in fitsflow.core; nothing executed.")
+                        except Exception:
+                            pass
             else:
-                print("fitsflow.core not available -> no execution.")
+                print("No core module available to run.")
     except Exception as e:
-        # capture runtime exception
-        print("Exception during core run:", e)
+        # capture exception text too
+        print("ERROR while running core:", e)
     finally:
         # restore plt.show
         plt.show = orig_show
 
-    # gather printed text and figures
-    result["prints"] = stdout_buf.getvalue()
-    # figs: combine captured_via_show + any new figure numbers opened
-    post_figs = set(plt.get_fignums())
-    new_nums = list((post_figs - pre_figs))
-    figs = []
-    # figures that remained open and have new numbers
-    for n in new_nums:
-        try:
-            figs.append(plt.figure(n))
-        except Exception:
-            pass
-    # extend with ones captured via fake_show
-    figs.extend(captured_via_show)
-    result["figs"] = figs
-    result["returns"] = ret_obj
+    out["prints"] = stdout_buf.getvalue()
+    out["figs"] = captured_figs
 
-    # detect new files created in working dir
-    after_files = set(os.listdir(work_dir))
-    new_files = sorted(list(after_files - before_files))
-    result["files"] = [os.path.join(work_dir, p) for p in new_files]
-    return result
+    # find new files created in work_dir
+    after = set(os.listdir(work_dir))
+    new = sorted(list(after - before))
+    out["saved_files"] = [os.path.join(work_dir, n) for n in new]
+    return out
 
-# ---------- UI: Per-file run + Per-HDU inspection ----------
-st.header("Per-file controls — run core or inspect HDUs")
+# -------------------------
+# Per-file UI: run core or inspect per-HDU (both)
+# -------------------------
+st.header("Per-file: run your core or inspect HDUs")
 
-# button to run core on all files
-run_all_key = make_key("run_all", *[os.path.basename(p) for p in file_paths])
-if st.button("▶ Run core on ALL uploaded files (capture everything)", key=run_all_key):
-    with st.spinner("Running core on all files..."):
-        res_all = run_core_capture(file_paths)
-    st.success("Core run complete — see captured outputs below.")
-    if res_all["prints"].strip():
-        st.subheader("Captured stdout / logs")
-        st.code(res_all["prints"])
-    if res_all["figs"]:
-        st.subheader("Captured matplotlib figures")
-        for i, fig in enumerate(res_all["figs"]):
-            try:
-                st.pyplot(fig)
-            except Exception:
-                buf = io.BytesIO()
-                fig.savefig(buf, format='png', bbox_inches='tight')
-                buf.seek(0)
-                st.image(buf, caption=f"Figure {i}")
-    if res_all["returns"] is not None:
-        st.subheader("Returned object from core (type: %s)" % type(res_all["returns"]).__name__)
-        st.write(res_all["returns"])
-    if res_all["files"]:
-        st.subheader("Files created by core")
-        for p in res_all["files"]:
-            fname = os.path.basename(p)
-            st.write("-", fname)
-            if fname.lower().endswith(".csv"):
-                try:
-                    df = pd.read_csv(p)
-                    st.dataframe(df.head(200))
-                    if enable_downloads:
-                        st.download_button(f"Download {fname}", open(p,"rb").read(), file_name=fname, key=make_key("dl", fname))
-                except Exception as e:
-                    st.write("Could not parse CSV:", e)
-            elif fname.lower().endswith((".png",".jpg",".jpeg")):
-                st.image(open(p,"rb").read())
-                if enable_downloads:
-                    st.download_button(f"Download {fname}", open(p,"rb").read(), file_name=fname, key=make_key("dl", fname))
-            else:
-                if enable_downloads:
-                    st.download_button(f"Download {fname}", open(p,"rb").read(), file_name=fname, key=make_key("dl", fname))
-
-# Per-file run & inspection
-for idx, p in enumerate(file_paths):
-    fname = os.path.basename(p)
+for idx, fp in enumerate(file_paths):
+    fname = os.path.basename(fp)
     st.subheader(fname)
-    cols = st.columns([1,1,1,2])
-    run_key = make_key("run", fname, idx)
-    if cols[0].button("▶ Run core on this file", key=run_key):
+    cols = st.columns([1,1,1,1])
+    if core is None:
+        cols[0].warning("fitsflow.core not importable — UI will still show tables/HDUs but cannot run core.")
+    run_key = make_key("runcore", fname, idx)
+    if cols[0].button("▶ Run core analysis (capture all outputs)", key=run_key):
+        t0 = time.time()
         with st.spinner(f"Running core on {fname} ..."):
-            res = run_core_capture([p])
-        st.success("Run complete.")
+            res = run_core_and_capture([fp])
+        t1 = time.time()
+        st.success(f"Run finished in {t1-t0:.2f}s — captured outputs below.")
+
+        # Show printed stdout
         if res["prints"].strip():
-            st.subheader("Captured stdout / logs")
+            st.subheader("Captured prints / logs")
             st.code(res["prints"])
+
+        # Show any matplotlib figs captured
         if res["figs"]:
             st.subheader("Captured matplotlib figures")
             for i, fig in enumerate(res["figs"]):
                 try:
                     st.pyplot(fig)
                 except Exception:
-                    buf = io.BytesIO(); fig.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0); st.image(buf, caption=f"Figure {i}")
-        if res["returns"] is not None:
-            st.subheader("Returned object from core (type: %s)" % type(res["returns"]).__name__)
-            # display returned object intelligently
-            ret = res["returns"]
-            if isinstance(ret, dict):
-                st.json(ret)
-                # show known types inside dict
-                if "plots" in ret:
-                    st.write("Returned 'plots' found — attempting to display.")
-                    for i, gg in enumerate(ret["plots"]):
-                        if hasattr(gg, "savefig"):  # matplotlib figure
-                            st.pyplot(gg)
-                        else:
-                            st.write(gg)
-            else:
-                st.write(ret)
-        if res["files"]:
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format='png', bbox_inches='tight')
+                    buf.seek(0)
+                    st.image(buf, caption=f"Figure {i}")
+            st.info(f"{len(res['figs'])} figure(s) captured from core.")
+
+        # Show any files core wrote to working dir
+        if res["saved_files"]:
             st.subheader("Files created by core")
-            for q in res["files"]:
-                qn = os.path.basename(q); st.write("-", qn)
-                if qn.lower().endswith(".csv"):
+            for fpath in res["saved_files"]:
+                fname2 = os.path.basename(fpath)
+                st.write("-", fname2)
+                # show CSV tables inline
+                if fname2.lower().endswith(".csv"):
                     try:
-                        df = pd.read_csv(q)
+                        df = pd.read_csv(fpath)
                         st.dataframe(df.head(200))
                         if enable_downloads:
-                            st.download_button(f"Download {qn}", open(q,"rb").read(), file_name=qn, key=make_key("dl", fname, qn))
+                            st.download_button(f"Download {fname2}", open(fpath,"rb").read(), file_name=fname2, key=make_key("dl", fname, fname2))
                     except Exception as e:
                         st.write("Could not parse CSV:", e)
-                elif qn.lower().endswith((".png",".jpg",".jpeg")):
-                    st.image(open(q,"rb").read())
+                # show PNGs
+                elif fname2.lower().endswith((".png",".jpg",".jpeg")):
+                    st.image(open(fpath,"rb").read(), caption=fname2)
                     if enable_downloads:
-                        st.download_button(f"Download {qn}", open(q,"rb").read(), file_name=qn, key=make_key("dl", fname, qn))
+                        st.download_button(f"Download {fname2}", open(fpath,"rb").read(), file_name=fname2, key=make_key("dl", fname, fname2))
                 else:
+                    # allow download of any created file
                     if enable_downloads:
-                        st.download_button(f"Download {qn}", open(q,"rb").read(), file_name=qn, key=make_key("dl", fname, qn))
+                        st.download_button(f"Download {fname2}", open(fpath,"rb").read(), file_name=fname2, key=make_key("dl", fname, fname2))
+        else:
+            st.info("No files were created by core in the working directory.")
 
-    inspect_key = make_key("inspect", fname, idx)
-    if cols[1].checkbox("🔎 Inspect HDUs", key=inspect_key):
+    # Offer per-file HDU inspection (transparency) — show headers/tables/images/1D spectra
+    if st.checkbox("🔎 Inspect HDUs (show tables/images/spectra)", key=make_key("inspect", fname, idx)):
         try:
-            with fits.open(p, memmap=False) as hdul:
+            with fits.open(fp, memmap=False) as hdul:
                 for h_i, hdu in enumerate(hdul):
-                    st.markdown(f"**HDU {h_i}** — {hdu.__class__.__name__}")
+                    st.markdown(f"**HDU {h_i}** — type: `{hdu.__class__.__name__}`")
+                    # header snippet
                     hdr = dict(hdu.header)
-                    st.write("Header (excerpt):")
+                    st.write("Header keys (sample):")
                     st.json({k: hdr[k] for k in list(hdr.keys())[:20]})
                     # table
                     if hasattr(hdu.data, 'names'):
                         try:
                             df = pd.DataFrame(hdu.data)
-                            st.write("Table (first 200 rows):")
+                            st.write(f"Table (first 200 rows) — columns: {list(df.columns)[:6]}")
                             st.dataframe(df.head(200))
                             if enable_downloads:
                                 st.download_button(f"Download {fname}_hdu{h_i}_table.csv", df.to_csv(index=False).encode('utf-8'), file_name=f"{fname}_hdu{h_i}_table.csv", key=make_key(fname,h_i,"table","dl"))
                         except Exception as e:
-                            st.write("Could not render table:", e)
-                    # image (2D)
+                            st.write("Could not show table:", e)
+                    # image
                     try:
                         arr = hdu.data
-                        if getattr(arr, "ndim", 0) == 2:
-                            st.write("2D image preview (HDU):")
+                        if getattr(arr,"ndim",0)==2:
+                            st.write("HDU is 2D — showing image preview:")
                             fig, ax = plt.subplots(figsize=(6,3))
-                            ax.imshow(arr, origin='lower', cmap='gray', aspect='auto'); ax.set_title(f"{fname} HDU {h_i} image")
+                            ax.imshow(arr, origin='lower', cmap='gray', aspect='auto')
+                            ax.set_title(f"{fname} HDU {h_i} image")
                             st.pyplot(fig)
                             if enable_downloads:
-                                buf = io.BytesIO(); fig.savefig(buf, format='png', bbox_inches='tight'); buf.seek(0)
+                                buf = io.BytesIO()
+                                fig.savefig(buf, format='png', bbox_inches='tight')
+                                buf.seek(0)
                                 st.download_button(f"Download image PNG (HDU {h_i})", buf, file_name=f"{fname}_hdu{h_i}_image.png", key=make_key(fname,h_i,"image","dl"))
                     except Exception:
                         pass
                     # 1D spectrum
                     wl, fl = try_extract_spectrum(hdu)
                     if wl is not None:
-                        st.write(f"1D spectrum: points={len(wl)}, range={wl.min():.5g}-{wl.max():.5g}")
+                        st.write(f"1D spectrum: {len(wl)} points, range {wl.min():.4g}-{wl.max():.4g}")
                         df_sp = pd.DataFrame({"wavelength": wl, "flux": fl})
                         st.dataframe(df_sp.head(200))
-                        # optional smoothing & plot
-                        if not raw_only and smoothing_enabled:
-                            fl_s = smooth_flux(fl.copy(), smoothing_window, polyorder)
-                        else:
-                            fl_s = None
-                        # plot using plotly for interactive view
-                        figp = plotly_spectrum(wl, fl, fl_s, err=None, title=f"{fname} HDU {h_i}", bands=DEFAULT_BANDS if show_bands else None, show_bands=show_bands and not raw_only, show_error=show_errorbars)
-                        st.plotly_chart(figp, use_container_width=True, key=make_key(fname,h_i,"plot"))
+                        # plot via matplotlib and show
+                        fig2, ax2 = plt.subplots(figsize=(8,3))
+                        ax2.plot(wl, fl, lw=0.9)
+                        ax2.set_xlabel("Wavelength")
+                        ax2.set_ylabel("Flux")
+                        ax2.grid(True)
+                        st.pyplot(fig2)
                         if enable_downloads:
-                            st.download_button("Download spectrum CSV", df_sp.to_csv(index=False).encode('utf-8'), file_name=f"{fname}_hdu{h_i}_spectrum.csv", key=make_key(fname,h_i,"spec","dl"))
+                            st.download_button(f"Download spectrum CSV (HDU {h_i})", df_sp.to_csv(index=False).encode('utf-8'), file_name=f"{fname}_hdu{h_i}_spectrum.csv", key=make_key(fname,h_i,"spectrum","dl"))
         except Exception as e:
-            st.error(f"Failed to inspect {fname}: {e}")
+            st.error(f"Failed to inspect HDUs: {e}")
 
-# ---------- Stacking quick UI ----------
-st.header("Quick stacking (use selection checkboxes above to include specific HDUs from files via Inspect HDUs)")
-st.write("If your `core.py` performed stacking already, captured files will include results; otherwise you can use the per-HDU select+stack logic by inspecting HDUs and noting which HDU indices to include. (Advanced: I can add per-HDU selection checkboxes in the UI next.)")
+st.info("Tip: Use the 'Run core analysis' button per file to capture everything your core.py prints or plots. If your core saves outputs, they'll appear under 'Files created by core'.")
 
-st.info("Everything above attempts to mirror exactly what your `core.py` prints, plots, and saves. If your `core.py` returns data structures (dicts) containing figures/tables, the app will display them where possible. If `core.py` writes to directories outside the working dir, update it to write inside the current working dir.")
-
-st.caption("Tip: if your core code returns structured objects, modify it to return a dict like {'plots':[plt.Figure,...], 'tables':[pd.DataFrame,...], 'files':['a.csv',...]} for best integration.")
