@@ -17,6 +17,7 @@ import pandas as pd
 import numpy as np
 from astropy.io import fits
 from scipy.signal import savgol_filter
+import glob
 
 st.set_page_config(page_title="AstroFlow", layout="wide")
 
@@ -44,7 +45,7 @@ for up in uploaded:
 st.success(f"Saved {len(file_paths)} files: {[os.path.basename(p) for p in file_paths]}")
 
 # Analyze FITS files (embedded core.py logic)
-def analyze_all_fits(file_paths):
+def analyze_all_fits():
     result = {"prints": "", "figs": [], "files": []}
     before_files = set(os.listdir(work_dir))
     pre_figs = set(plt.get_fignums())
@@ -59,6 +60,12 @@ def analyze_all_fits(file_paths):
             pass
     plt.show = fake_show
     stdout_buf = io.StringIO()
+    orig_glob = glob.glob
+    def patched_glob(pattern):
+        if '/content/*.fits' in pattern:
+            return [os.path.join(work_dir, f) for f in os.listdir(work_dir) if f.endswith('.fits')]
+        return orig_glob(pattern)
+    glob.glob = patched_glob
     
     try:
         with contextlib.redirect_stdout(stdout_buf):
@@ -212,20 +219,21 @@ def analyze_all_fits(file_paths):
                 snr_csv = os.path.join(work_dir, "snr.csv")
                 snr_df.to_csv(snr_csv, index=False)
                 
-        except Exception as e:
-            print(f"Error during analysis: {e}")
+    except Exception as e:
+        print(f"Error during analysis: {e}")
     
     result["prints"] = stdout_buf.getvalue()
     post_figs = set(plt.get_fignums())
     result["figs"] = captured_figs + [plt.figure(n) for n in (post_figs - pre_figs)]
     result["files"] = [os.path.join(work_dir, f) for f in (set(os.listdir(work_dir)) - before_files)]
     plt.show = orig_show
+    glob.glob = orig_glob
     return result
 
 # Run button
 if st.button("Run Analysis"):
     with st.spinner("Running analysis..."):
-        res = analyze_all_fits(file_paths)
+        res = analyze_all_fits()
     
     # Display logs
     if res["prints"].strip():
