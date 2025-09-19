@@ -1,53 +1,14 @@
-# app.py — Full updated Streamlit app (uses Fit(s)Flow exporters & reporters)
-# Preserves your original UI/behavior and adds Export all / PDF report features.
+# app.py (fixed: unique stacked/download keys + combined molecular-band multiselect)
 import streamlit as st
 import numpy as np
 from astropy.io import fits
 from scipy.signal import savgol_filter
 import pandas as pd
-import tempfile, os, io, time, re, importlib, sys
+import tempfile, os, io, time, re
 from typing import Tuple
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="AstroFlow · FITSFlow", layout="wide", initial_sidebar_state="expanded")
-
-# ---------------------------
-# Robust import for FitsFlow exporters/reporters (handles case variations)
-# ---------------------------
-_exporters = None
-_reporters = None
-_pkg_candidates = ["FitsFlow", "fitsflow", "Fitsflow", "FITSFLOW"]
-
-for _pkg in _pkg_candidates:
-    try:
-        _exporters = importlib.import_module(f"{_pkg}.exporters")
-        _reporters = importlib.import_module(f"{_pkg}.reporters")
-        break
-    except ModuleNotFoundError:
-        # If folder exists but not on sys.path, add parent and retry
-        folder = os.path.join(os.path.dirname(__file__), _pkg)
-        if os.path.isdir(folder):
-            parent = os.path.dirname(folder)
-            if parent not in sys.path:
-                sys.path.insert(0, parent)
-            try:
-                _exporters = importlib.import_module(f"{_pkg}.exporters")
-                _reporters = importlib.import_module(f"{_pkg}.reporters")
-                break
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-if _exporters is None or _reporters is None:
-    raise ImportError(
-        "Could not import exporters/reporters from FitsFlow package. Ensure the package folder (FitsFlow or fitsflow) "
-        "exists next to app.py, contains exporters.py and reporters.py, and has __init__.py."
-    )
-
-# assign friendly names
-exporters = _exporters
-reporters = _reporters
 
 # ---------------------------
 # Helper: stable key generator
@@ -160,6 +121,7 @@ smoothing_window = st.sidebar.slider("Smoothing window (odd)", 5, 501, 51, step=
 polyorder = st.sidebar.slider("SavGol polyorder", 1, 5, 3)
 
 show_bands = st.sidebar.checkbox("Show molecular bands (overlay)", value=True)
+# Replace multiple checkboxes with a single multiselect for clarity & to avoid many widgets
 selected_bands = st.sidebar.multiselect(
     "Select molecular bands to display",
     options=list(DEFAULT_BANDS.keys()),
@@ -183,7 +145,7 @@ st.sidebar.caption("Prototype · AstroFlow / FutureMind")
 # Main UI area
 # ---------------------------
 st.title("🔭 AstroFlow · FITSFlow Processor")
-st.markdown("Upload FITS files (JWST/HST/TESS/generic). Tabs: Raw | Smoothed | Molecule Detection | Stacked | Table | Downloads")
+st.markdown("Upload FITS files (JWST/HST/TESS/generic). Tabs: Raw | Smoothed | Molecule Detection | Stacked | Table")
 
 uploaded = st.file_uploader("Upload one or more FITS files", type=["fits"], accept_multiple_files=True)
 
@@ -217,34 +179,6 @@ for path in file_paths:
             for idx, hdu in enumerate(hdul):
                 wl, fl = try_extract_spectrum(hdu)
                 if wl is None:
-                    # capture table/image HDUs as results so exporters/reporters can use them
-                    entry_hdr = dict(hdu.header)
-                    table_df = None
-                    image_arr = None
-                    try:
-                        if hasattr(hdu.data, 'names'):
-                            import pandas as _pd
-                            table_df = _pd.DataFrame(hdu.data)
-                    except Exception:
-                        table_df = None
-                    try:
-                        arr = hdu.data
-                        if arr is not None and getattr(arr, "ndim", 0) == 2:
-                            image_arr = np.array(arr)
-                    except Exception:
-                        image_arr = None
-                    results.append({
-                        "file": fname,
-                        "path": path,
-                        "hdu_index": idx,
-                        "header": entry_hdr,
-                        "wl": None,
-                        "fl": None,
-                        "err": None,
-                        "table": table_df,
-                        "image_array": image_arr,
-                        "plots": []
-                    })
                     continue
                 found_any = True
                 err = None
@@ -255,13 +189,10 @@ for path in file_paths:
                     "header": dict(hdu.header),
                     "wl": np.array(wl, dtype=float),
                     "fl": np.array(fl, dtype=float),
-                    "err": err,
-                    "table": None,
-                    "image_array": None,
-                    "plots": []
+                    "err": err
                 })
             if not found_any:
-                st.warning(f"No 1D spectrum auto-extracted from {fname}. HDUs captured for table/image display.")
+                st.warning(f"No 1D spectrum auto-extracted from {fname}. Showing HDU summaries.")
     except Exception as e:
         st.error(f"Failed to open {fname}: {e}")
 
@@ -269,15 +200,8 @@ progress.progress(100)
 time.sleep(0.2)
 
 if len(results) == 0:
-    st.error("No spectra or displayable HDUs were extracted from uploaded files.")
+    st.error("No spectra could be extracted from uploaded files. You may upload pre-processed wavelength+flux CSVs.")
     st.stop()
-
-# initialize exported files state
-if "exported_files" not in st.session_state:
-    st.session_state["exported_files"] = []
-
-if "generated_pdf" not in st.session_state:
-    st.session_state["generated_pdf"] = None
 
 tabs = st.tabs(["Raw Spectrum", "Smoothed", "Molecule Detection", "Stacked", "Data Table", "Downloads"])
 
@@ -299,23 +223,6 @@ def plot_spectrum_interactive(wl, fl, fl_smooth=None, err=None, title="Spectrum"
 with tabs[0]:
     st.header("Raw Spectrum")
     for res in results:
-        # only plot if spectral data present
-        if res.get("wl") is None:
-            # show header / table / image if no spectrum
-            label = f"{res['file']} (HDU {res['hdu_index']})"
-            with st.expander(label, expanded=False):
-                st.subheader("Header (partial)")
-                hdr = res.get('header',{})
-                keys_to_show = {k: hdr[k] for k in list(hdr.keys())[:20]}
-                st.json(keys_to_show)
-                if res.get('table') is not None:
-                    st.write("Table HDU preview:")
-                    st.dataframe(res['table'].head(200))
-                if res.get('image_array') is not None:
-                    st.write("Image HDU preview:")
-                    st.image(res['image_array'], use_column_width=True)
-            continue
-
         label = f"{res['file']} (HDU {res['hdu_index']})"
         # DO NOT pass a key to expander here to avoid Streamlit TypeError in some runtimes
         with st.expander(label, expanded=False):
@@ -337,8 +244,6 @@ with tabs[0]:
 with tabs[1]:
     st.header("Smoothed Spectra")
     for res in results:
-        if res.get("wl") is None:
-            continue
         label = f"{res['file']} (HDU {res['hdu_index']})"
         with st.expander(label, expanded=False):
             wl = res['wl']; fl = res['fl']; err = res['err']
@@ -363,8 +268,6 @@ with tabs[2]:
     active_bands = {mol: DEFAULT_BANDS[mol] for mol in selected_bands} if show_bands else {}
 
     for res in results:
-        if res.get("wl") is None:
-            continue
         label = f"{res['file']} (HDU {res['hdu_index']})"
         with st.expander(label, expanded=False):
             wl = res['wl']; fl = res['fl']
@@ -390,10 +293,10 @@ with tabs[3]:
     if len(results) < 2 or not stack_enabled:
         st.info("Upload multiple spectra and enable stacking to see combined results.")
     else:
-        min_wl = min(np.nanmin(r['wl']) for r in results if r.get("wl") is not None)
-        max_wl = max(np.nanmax(r['wl']) for r in results if r.get("wl") is not None)
+        min_wl = min(np.nanmin(r['wl']) for r in results)
+        max_wl = max(np.nanmax(r['wl']) for r in results)
         ref_wl = np.linspace(min_wl, max_wl, 2000)
-        interp_fluxes = [interp_to_reference(r['wl'], r['fl'], ref_wl) for r in results if r.get("wl") is not None]
+        interp_fluxes = [interp_to_reference(r['wl'], r['fl'], ref_wl) for r in results]
         arr = np.array(interp_fluxes)
         stacked = np.nanmedian(arr, axis=0) if stack_method == "median" else np.nanmean(arr, axis=0)
         if smoothing_enabled and not raw_only and len(stacked) >= smoothing_window:
@@ -431,100 +334,38 @@ with tabs[4]:
     for r in results:
         label = f"{r['file']} (HDU {r['hdu_index']})"
         st.subheader(label)
-        if r.get("wl") is not None:
-            df = pd.DataFrame({"wavelength": r['wl'], "flux": r['fl']})
-            st.dataframe(df.head(500), use_container_width=True)
-            if enable_downloads:
-                dl_key = make_key(r['file'], r['hdu_index'], 'download', 'table_csv')
-                st.download_button(f"Download CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{label}.csv", mime='text/csv', key=dl_key)
-        elif r.get("table") is not None:
-            st.write("Table HDU preview:")
-            st.dataframe(r['table'].head(200))
-            if enable_downloads:
-                csv_key = make_key(r['file'], r['hdu_index'], 'download', 'table_hdu_csv')
-                st.download_button(f"Download HDU table CSV: {label}", r['table'].to_csv(index=False).encode('utf-8'), file_name=f"{label}_table.csv", key=csv_key)
-        elif r.get("image_array") is not None:
-            st.write("Image HDU preview:")
-            st.image(r['image_array'], use_column_width=True)
-            # offer image download
-            if enable_downloads:
-                try:
-                    from io import BytesIO
-                    from PIL import Image
-                    arr = r['image_array']
-                    a = np.array(arr)
-                    a = a - np.nanmin(a)
-                    if np.nanmax(a) > 0:
-                        a = a / np.nanmax(a)
-                    a8 = (a * 255).astype('uint8')
-                    if a8.ndim == 2:
-                        pil = Image.fromarray(a8).convert("L").convert("RGB")
-                    else:
-                        pil = Image.fromarray(a8)
-                    buf = BytesIO()
-                    pil.save(buf, format="PNG")
-                    buf.seek(0)
-                    img_dl_key = make_key(r['file'], r['hdu_index'], 'download', 'image_png')
-                    st.download_button(f"Download Image PNG: {label}", buf.getvalue(), file_name=f"{label}_image.png", key=img_dl_key)
-                except Exception:
-                    pass
+        df = pd.DataFrame({"wavelength": r['wl'], "flux": r['fl']})
+        st.dataframe(df.head(500), use_container_width=True)
+        if enable_downloads:
+            dl_key = make_key(r['file'], r['hdu_index'], 'download', 'table_csv')
+            st.download_button(f"Download CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{label}.csv", mime='text/csv', key=dl_key)
 
 # Downloads tab
 with tabs[5]:
     st.header("Downloads & Export")
-    st.markdown("You can export all detected outputs (CSV/PNG) for this session, and also generate a PDF report.")
-
-    # Export all files button (creates CSVs/PNGs via exporters.export_all into tmpdir)
     if enable_downloads:
-        if st.button("Export all files (CSV & PNG) for this session"):
-            try:
-                generated = exporters.export_all(results, tmpdir)
-                st.session_state["exported_files"] = generated
-                st.success(f"Exported {len(generated)} files to working dir.")
-            except Exception as e:
-                st.error(f"Export failed: {e}")
+        for r in results:
+            label = f"{r['file']}_hdu{r['hdu_index']}"
+            df = pd.DataFrame({"wavelength": r['wl'], "flux": r['fl']})
+            dl_key = make_key(label, 'download', 'csv')
+            st.download_button(f"CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{label}.csv", mime='text/csv', key=dl_key)
 
-        # show exported files if present in session state
-        if st.session_state.get("exported_files"):
-            st.subheader("Exported files")
-            for p in st.session_state["exported_files"]:
-                name = os.path.basename(p)
-                st.write("-", name)
-                try:
-                    if name.lower().endswith(".csv"):
-                        st.dataframe(pd.read_csv(p).head(200))
-                    elif name.lower().endswith((".png", ".jpg", ".jpeg")):
-                        st.image(p, caption=name, use_column_width=True)
-                except Exception:
-                    st.write("Preview not available")
-                # download button
-                try:
-                    with open(p, "rb") as fh:
-                        st.download_button(f"Download {name}", fh.read(), file_name=name, key=make_key("dl", name))
-                except Exception:
-                    pass
-
-        # Generate PDF report (calls reporters.generate_pdf_report)
-        st.markdown("---")
-        if st.button("Generate PDF report (includes images, sample tables, exports)"):
-            try:
-                out_pdf = os.path.join(tmpdir, "astroflow_report.pdf")
-                # ensure we have exported files first (reporters will also call exporters internally)
-                _ = exporters.export_all(results, tmpdir)
-                reporters.generate_pdf_report(results, out_pdf)
-                st.session_state["generated_pdf"] = out_pdf
-                st.success("PDF report generated.")
-            except Exception as e:
-                st.error(f"PDF generation failed: {e}")
-
-        if st.session_state.get("generated_pdf"):
-            try:
-                with open(st.session_state["generated_pdf"], "rb") as fh:
-                    st.download_button("Download PDF report", fh.read(), file_name="astroflow_report.pdf", key=make_key("report_dl"))
-            except Exception:
-                st.write("PDF not available for download.")
+        if len(results) >= 2 and stack_enabled:
+            min_wl = min(np.nanmin(r['wl']) for r in results)
+            max_wl = max(np.nanmax(r['wl']) for r in results)
+            ref_wl = np.linspace(min_wl, max_wl, 2000)
+            interp_fluxes = [interp_to_reference(r['wl'], r['fl'], ref_wl) for r in results]
+            arr = np.array(interp_fluxes)
+            stacked = np.nanmedian(arr, axis=0) if stack_method=="median" else np.nanmean(arr, axis=0)
+            if True:
+                if np.nanmax(stacked) != np.nanmin(stacked):
+                    stacked = (stacked - np.nanmin(stacked)) / (np.nanmax(stacked) - np.nanmin(stacked))
+            df_stack = pd.DataFrame({"wavelength": ref_wl, "stacked": stacked})
+            # unique key for the downloads tab stacked export
+            dl_key = make_key('stacked','download','csv','downloads_tab')
+            st.download_button("Download stacked CSV", df_stack.to_csv(index=False).encode('utf-8'), file_name="stacked_spectrum.csv", mime='text/csv', key=dl_key)
     else:
-        st.info("Enable downloads in the sidebar to see export & report options.")
+        st.info("Enable downloads in the sidebar to see export options.")
 
 st.sidebar.success("Ready. Use the tabs to explore raw and processed data.")
 st.caption("AstroFlow · FITSFlow MVP — upload data, toggle options, export results.")
