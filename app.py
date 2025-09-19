@@ -1,17 +1,53 @@
-# app.py (updated to use FitsFlow exporters & reporters; preserves original UI/logic)
+# app.py — Full updated Streamlit app (uses Fit(s)Flow exporters & reporters)
+# Preserves your original UI/behavior and adds Export all / PDF report features.
 import streamlit as st
 import numpy as np
 from astropy.io import fits
 from scipy.signal import savgol_filter
 import pandas as pd
-import tempfile, os, io, time, re
+import tempfile, os, io, time, re, importlib, sys
 from typing import Tuple
 import plotly.graph_objects as go
 
-# new imports (your exporter/reporter modules live inside FitsFlow/)
-from FitsFlow import exporters, reporters
-
 st.set_page_config(page_title="AstroFlow · FITSFlow", layout="wide", initial_sidebar_state="expanded")
+
+# ---------------------------
+# Robust import for FitsFlow exporters/reporters (handles case variations)
+# ---------------------------
+_exporters = None
+_reporters = None
+_pkg_candidates = ["FitsFlow", "fitsflow", "Fitsflow", "FITSFLOW"]
+
+for _pkg in _pkg_candidates:
+    try:
+        _exporters = importlib.import_module(f"{_pkg}.exporters")
+        _reporters = importlib.import_module(f"{_pkg}.reporters")
+        break
+    except ModuleNotFoundError:
+        # If folder exists but not on sys.path, add parent and retry
+        folder = os.path.join(os.path.dirname(__file__), _pkg)
+        if os.path.isdir(folder):
+            parent = os.path.dirname(folder)
+            if parent not in sys.path:
+                sys.path.insert(0, parent)
+            try:
+                _exporters = importlib.import_module(f"{_pkg}.exporters")
+                _reporters = importlib.import_module(f"{_pkg}.reporters")
+                break
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+if _exporters is None or _reporters is None:
+    raise ImportError(
+        "Could not import exporters/reporters from FitsFlow package. Ensure the package folder (FitsFlow or fitsflow) "
+        "exists next to app.py, contains exporters.py and reporters.py, and has __init__.py."
+    )
+
+# assign friendly names
+exporters = _exporters
+reporters = _reporters
 
 # ---------------------------
 # Helper: stable key generator
@@ -124,7 +160,6 @@ smoothing_window = st.sidebar.slider("Smoothing window (odd)", 5, 501, 51, step=
 polyorder = st.sidebar.slider("SavGol polyorder", 1, 5, 3)
 
 show_bands = st.sidebar.checkbox("Show molecular bands (overlay)", value=True)
-# Replace multiple checkboxes with a single multiselect for clarity & to avoid many widgets
 selected_bands = st.sidebar.multiselect(
     "Select molecular bands to display",
     options=list(DEFAULT_BANDS.keys()),
@@ -182,8 +217,7 @@ for path in file_paths:
             for idx, hdu in enumerate(hdul):
                 wl, fl = try_extract_spectrum(hdu)
                 if wl is None:
-                    # still capture image/table HDUs as results with None wl/fl so exporters/reporters can handle them
-                    # get header and possible table/image
+                    # capture table/image HDUs as results so exporters/reporters can use them
                     entry_hdr = dict(hdu.header)
                     table_df = None
                     image_arr = None
@@ -399,7 +433,7 @@ with tabs[4]:
         st.subheader(label)
         if r.get("wl") is not None:
             df = pd.DataFrame({"wavelength": r['wl'], "flux": r['fl']})
-            st.dataframe(df.head(500), use_column_width=True)
+            st.dataframe(df.head(500), use_container_width=True)
             if enable_downloads:
                 dl_key = make_key(r['file'], r['hdu_index'], 'download', 'table_csv')
                 st.download_button(f"Download CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{label}.csv", mime='text/csv', key=dl_key)
@@ -475,7 +509,7 @@ with tabs[5]:
         if st.button("Generate PDF report (includes images, sample tables, exports)"):
             try:
                 out_pdf = os.path.join(tmpdir, "astroflow_report.pdf")
-                # ensure we have exported files first (reporters will also call exporters internally, but exporting ahead is fine)
+                # ensure we have exported files first (reporters will also call exporters internally)
                 _ = exporters.export_all(results, tmpdir)
                 reporters.generate_pdf_report(results, out_pdf)
                 st.session_state["generated_pdf"] = out_pdf
