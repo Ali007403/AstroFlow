@@ -457,9 +457,9 @@ with tabs[7]:
             import io
             buf = io.BytesIO()
            import plotly.io as pio
-buf = io.BytesIO()
-buf.write(pio.to_image(fig, format="png"))
-buf.seek(0)
+           buf = io.BytesIO()
+           buf.write(pio.to_image(fig, format="png"))
+           buf.seek(0)
             img_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res['hdu_index']}_spectrum.png")
             with open(img_path, "wb") as f:
                 f.write(buf.read())
