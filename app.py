@@ -456,8 +456,10 @@ with tabs[7]:
             fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} HDU {res['hdu_index']}")
             import io
             buf = io.BytesIO()
-            fig.write_image(buf, format="png")
-            buf.seek(0)
+           import plotly.io as pio
+buf = io.BytesIO()
+buf.write(pio.to_image(fig, format="png"))
+buf.seek(0)
             img_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res['hdu_index']}_spectrum.png")
             with open(img_path, "wb") as f:
                 f.write(buf.read())
