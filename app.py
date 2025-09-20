@@ -398,47 +398,43 @@ st.caption("AstroFlow · FITSFlow MVP — upload data, toggle options, export re
 with tabs[6]:
     st.header("FITS Images")
     found_image = False
+
     for r in results:
-        # Open the FITS again for image HDUs
+        # Open each FITS file
         with fits.open(r["path"], memmap=False) as hdul:
             for idx, hdu in enumerate(hdul):
                 if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
                     found_image = True
                     st.subheader(f"{r['file']} (HDU {idx}) — Image")
+
                     import matplotlib.pyplot as plt
                     fig, ax = plt.subplots()
                     im = ax.imshow(hdu.data, cmap="gray", origin="lower", aspect="auto")
                     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+                    # Display figure
                     st.pyplot(fig)
 
-                    # Export button
+                    # Optional PNG download
                     if enable_downloads:
                         import io
-                        import PIL.Image as Image
                         buf = io.BytesIO()
-                        plt.savefig(buf, format="png")
+                        fig.savefig(buf, format="png")
                         buf.seek(0)
-                        # Optional PNG download
-if enable_downloads:
-    import io
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png")
-    buf.seek(0)
-    # Wrap in an expander to avoid duplicate element context
-    with st.expander(f"{r['file']} HDU {idx} - Image Download", expanded=False):
-        dl_key = make_key(r['file'], idx, 'image_download', time.time())  # ensure unique key
-        st.download_button(
-            label=f"Download Image (PNG) — {r['file']} HDU {idx}",
-            data=buf,
-            file_name=f"{r['file']}_hdu{idx}_image.png",
-            mime="image/png",
-            key=dl_key
-        )
+                        dl_key = make_key(r['file'], idx, 'image_download', time.time())  # unique key
+                        st.download_button(
+                            label=f"Download Image (PNG) — {r['file']} HDU {idx}",
+                            data=buf,
+                            file_name=f"{r['file']}_hdu{idx}_image.png",
+                            mime="image/png",
+                            key=dl_key
+                        )
 
-                    plt.close(fig)
+                    plt.close(fig)  # correctly aligned here
 
     if not found_image:
         st.info("No 2D images found in uploaded FITS files.")
+
 
 # Reports tab
 with tabs[7]:
