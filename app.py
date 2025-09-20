@@ -492,7 +492,7 @@ with tabs[7]:
 
         # Generate PDF using reporters module
         try:
-            from FitsFlow.reporters import generate_pdf_report
+            from FitsFlow.reporter import generate_pdf_report
             pdf_path = generate_pdf_report(
                 output_path=tmp_pdf,
                 metadata={"title": "AstroFlow Report"},
