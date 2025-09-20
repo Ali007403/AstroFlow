@@ -55,26 +55,43 @@ def find_wl_flux_from_table(table):
     return wl_col, fl_col
 
 def try_extract_spectrum(hdu):
+    """
+    Try to extract a 1D spectrum (wavelength, flux) from an HDU.
+    Uses table-name heuristics via FitsFlow.fields.map_columns when possible.
+    Returns (wl_array, fl_array) or (None, None) if not found.
+    """
     data = hdu.data
     if data is None:
         return None, None
-    # Table-like
-    if hasattr(data, 'names'):
-        wl_col, fl_col = find_wl_flux_from_table(data)
-        if wl_col and fl_col:
-            wl = np.array(data[wl_col]).astype(float).flatten()
-            fl = np.array(data[fl_col]).astype(float).flatten()
-            mask = np.isfinite(wl) & np.isfinite(fl)
-            return wl[mask], fl[mask]
-        # fallback: first two numeric columns
-        names = safe_names(data)
-        nums = [n for n in names if np.issubdtype(data[n].dtype, np.number)]
-        if len(nums) >= 2:
-            wl = np.array(data[nums[0]]).astype(float).flatten()
-            fl = np.array(data[nums[1]]).astype(float).flatten()
-            mask = np.isfinite(wl) & np.isfinite(fl)
-            return wl[mask], fl[mask]
-    # Image-like
+
+    # Table-like HDU (FITS BinaryTable / TableHDU)
+    if hasattr(data, 'names') or hasattr(data, 'dtype') and data.dtype.names is not None:
+        try:
+            # convert to pandas for robust column mapping
+            import pandas as _pd
+            df = _pd.DataFrame(data)
+            mapping = map_columns(df)
+            wl_col = mapping.get("wavelength")
+            fl_col = mapping.get("flux")
+            if wl_col and fl_col and wl_col in df.columns and fl_col in df.columns:
+                wl = _pd.to_numeric(df[wl_col], errors="coerce").to_numpy(dtype=float)
+                fl = _pd.to_numeric(df[fl_col], errors="coerce").to_numpy(dtype=float)
+                mask = np.isfinite(wl) & np.isfinite(fl)
+                if np.any(mask):
+                    return wl[mask], fl[mask]
+            # fallback: old approach using names list
+            names = safe_names(data)
+            nums = [n for n in names if np.issubdtype(data[n].dtype, np.number)]
+            if len(nums) >= 2:
+                wl = np.array(data[nums[0]]).astype(float).flatten()
+                fl = np.array(data[nums[1]]).astype(float).flatten()
+                mask = np.isfinite(wl) & np.isfinite(fl)
+                return wl[mask], fl[mask]
+        except Exception:
+            # if anything goes wrong with pandas conversion, continue to other checks
+            pass
+
+    # Image-like HDU
     try:
         arr = np.array(data)
         if arr.ndim == 1:
@@ -83,13 +100,16 @@ def try_extract_spectrum(hdu):
             mask = np.isfinite(fl)
             return wl[mask], fl[mask]
         elif arr.ndim == 2:
+            # collapse along rows -> 1D spectrum approximation
             fl = np.nanmean(arr, axis=0)
             wl = np.arange(fl.size)
             mask = np.isfinite(fl)
             return wl[mask], fl[mask]
     except Exception:
         pass
+
     return None, None
+
 
 def interp_to_reference(wl, fl, ref_wl):
     try:
@@ -165,20 +185,85 @@ st.sidebar.caption("Prototype · AstroFlow / FutureMind")
 st.title("🔭 AstroFlow · FITSFlow Processor")
 st.markdown("Upload FITS files (JWST/HST/TESS/generic). Tabs: Raw | Smoothed | Molecule Detection | Stacked | Table")
 
-uploaded = st.file_uploader("Upload one or more FITS files", type=["fits"], accept_multiple_files=True)
+uploaded = st.file_uploader(
+    "Upload one or more FITS/CSV files",
+    type=["fits", "csv"],
+    accept_multiple_files=True
+)
+
 
 if not uploaded:
     st.info("Upload FITS spectral files to start. Example FITS: K2-18b, GJ-1214b.")
     st.stop()
 
-# Save uploaded to temp dir
+# --- Save uploaded files and process each (FITS or CSV) ---
 tmpdir = tempfile.mkdtemp()
 file_paths = []
-for up in uploaded:
-    dst = os.path.join(tmpdir, up.name)
+results = []
+nfiles = len(uploaded)
+progress = st.progress(0)
+
+for i, up in enumerate(uploaded, start=1):
+    progress.progress(int((i-1)/nfiles*100))
+    fname = up.name
+    dst = os.path.join(tmpdir, fname)
+    # persist uploaded file to tmpdir
     with open(dst, "wb") as f:
-        f.write(up.read())
+        f.write(up.getvalue())
     file_paths.append(dst)
+
+    lower = fname.lower()
+    # If CSV, use csv_handler.ingest_csv_file
+    if lower.endswith(".csv"):
+        try:
+            csv_outputs = ingest_csv_file(dst, filename=fname)  # returns list of result dicts
+            for out in csv_outputs:
+                # ensure arrays are numpy arrays (or None)
+                if out.get("wl") is not None:
+                    out["wl"] = np.asarray(out["wl"], dtype=float)
+                if out.get("fl") is not None:
+                    out["fl"] = np.asarray(out["fl"], dtype=float)
+                results.append(out)
+        except Exception as e:
+            st.error(f"Failed to parse CSV {fname}: {e}")
+        continue
+
+    # Otherwise attempt to open as FITS
+    try:
+        with fits.open(dst, memmap=False) as hdul:
+            found_any = False
+            for idx, hdu in enumerate(hdul):
+                wl, fl = try_extract_spectrum(hdu)
+                if wl is None:
+                    continue
+                found_any = True
+                err = None
+                results.append({
+                    "file": fname,
+                    "path": dst,
+                    "hdu_index": idx,
+                    "header": dict(hdu.header) if hasattr(hdu, "header") else {},
+                    "wl": np.array(wl, dtype=float),
+                    "fl": np.array(fl, dtype=float),
+                    "err": err
+                })
+            if not found_any:
+                # still record the file so its images/tables can be used by Images/Reports tabs
+                results.append({
+                    "file": fname,
+                    "path": dst,
+                    "hdu_index": None,
+                    "header": {},
+                    "wl": None,
+                    "fl": None,
+                    "err": None
+                })
+    except Exception as e:
+        st.error(f"Failed to open {fname}: {e}")
+
+progress.progress(100)
+time.sleep(0.2)
+
 
 # Process files with progress
 results = []
@@ -230,6 +315,7 @@ tabs = st.tabs([
     "Downloads",
     "Images",
     "Reports"
+    "Anomilies"
 ])
 
 
@@ -251,7 +337,10 @@ def plot_spectrum_interactive(wl, fl, fl_smooth=None, err=None, title="Spectrum"
 with tabs[0]:
     st.header("Raw Spectrum")
     for res in results:
-        label = f"{res['file']} (HDU {res['hdu_index']})"
+    # skip entries with no 1D spectrum (e.g., CSV table-only or image-only FITS)
+    if res.get("wl") is None or res.get("fl") is None:
+        continue
+    label = f"{res['file']} (HDU {res['hdu_index']})"
         # DO NOT pass a key to expander here to avoid Streamlit TypeError in some runtimes
         with st.expander(label, expanded=False):
             st.subheader("Header (partial)")
@@ -272,7 +361,10 @@ with tabs[0]:
 with tabs[1]:
     st.header("Smoothed Spectra")
     for res in results:
-        label = f"{res['file']} (HDU {res['hdu_index']})"
+    # skip entries with no 1D spectrum (e.g., CSV table-only or image-only FITS)
+    if res.get("wl") is None or res.get("fl") is None:
+        continue
+    label = f"{res['file']} (HDU {res['hdu_index']})"
         with st.expander(label, expanded=False):
             wl = res['wl']; fl = res['fl']; err = res['err']
             if raw_only:
@@ -296,7 +388,10 @@ with tabs[2]:
     active_bands = {mol: DEFAULT_BANDS[mol] for mol in selected_bands} if show_bands else {}
 
     for res in results:
-        label = f"{res['file']} (HDU {res['hdu_index']})"
+    # skip entries with no 1D spectrum (e.g., CSV table-only or image-only FITS)
+    if res.get("wl") is None or res.get("fl") is None:
+        continue
+    label = f"{res['file']} (HDU {res['hdu_index']})"
         with st.expander(label, expanded=False):
             wl = res['wl']; fl = res['fl']
             if raw_only:
@@ -360,10 +455,16 @@ with tabs[3]:
 with tabs[4]:
     st.header("Data Table")
     for r in results:
-        label = f"{r['file']} (HDU {r['hdu_index']})"
-        st.subheader(label)
+    label = f"{r['file']} (HDU {r.get('hdu_index')})"
+    st.subheader(label)
+    if r.get("wl") is not None and r.get("fl") is not None:
         df = pd.DataFrame({"wavelength": r['wl'], "flux": r['fl']})
-        st.dataframe(df.head(500), use_container_width=True)
+    elif r.get("orig_df") is not None:
+        df = r.get("orig_df")
+    else:
+        st.write("No 1D data for this file.")
+        continue
+    st.dataframe(df.head(500), use_container_width=True)
         if enable_downloads:
             dl_key = make_key(r['file'], r['hdu_index'], 'download', 'table_csv')
             st.download_button(f"Download CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{label}.csv", mime='text/csv', key=dl_key)
@@ -520,3 +621,54 @@ with tabs[7]:
                 )
         else:
             st.error("PDF report was not generated.")
+
+
+# Anomalies tab
+with tabs[8]:
+    st.header("Anomaly Detection")
+    st.markdown("Lightweight detectors: z-score outliers, local dips, spikes. Tune thresholds in the sidebar.")
+
+    # detection params in sidebar
+    st.sidebar.markdown("Anomaly detection settings")
+    z_thresh = st.sidebar.slider("Outlier z-threshold", 3, 10, 4)
+    dip_window = st.sidebar.slider("Dip median window (px)", 11, 501, 101, step=2)
+    dip_depth = st.sidebar.number_input("Dip minimum depth fraction", min_value=0.0001, max_value=1.0, value=0.01, step=0.001)
+    spike_window = st.sidebar.slider("Spike window", 3, 101, 11, step=2)
+    spike_std = st.sidebar.slider("Spike std-factor", 2, 20, 6)
+
+    anomalies_all = []
+    for res in results:
+        if res.get("wl") is None or res.get("fl") is None:
+            continue
+        wl = res["wl"]
+        fl = res["fl"]
+        params = {"z_thresh": z_thresh, "dip_window": dip_window, "dip_depth": dip_depth, "spike_window": spike_window, "spike_std": spike_std}
+        anoms = detect_anomalies(wl, fl, params=params)
+        for a in anoms:
+            a["file"] = res.get("file")
+            a["hdu_index"] = res.get("hdu_index")
+        anomalies_all += anoms
+
+        st.subheader(f"{res['file']} (HDU {res.get('hdu_index')})")
+        fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} (HDU {res.get('hdu_index')})")
+        fig = annotate_plotly(fig, anoms)
+        st.plotly_chart(fig, use_container_width=True, key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot'))
+
+        if anoms:
+            import pandas as _pd
+            st.table(_pd.DataFrame(anoms)[["type", "wl", "index", "value"]].head(200))
+            if enable_downloads:
+                import json
+                dl_key = make_key(res['file'], res.get('hdu_index'), 'anoms_json')
+                st.download_button(f"Download anomalies JSON - {res['file']}", json.dumps(anoms, indent=2).encode('utf-8'), file_name=f"{res['file']}_hdu{res.get('hdu_index')}_anomalies.json", mime="application/json", key=dl_key)
+        else:
+            st.write("No anomalies detected for this spectrum.")
+
+    st.markdown("### Summary")
+    st.write(f"Total anomalies detected: {len(anomalies_all)}")
+    if anomalies_all and enable_downloads:
+        import pandas as _pd
+        df_an = _pd.DataFrame(anomalies_all)
+        dl_key_all = make_key('all','anomalies','csv')
+        st.download_button("Download all anomalies (CSV)", df_an.to_csv(index=False).encode('utf-8'), file_name="astroflow_anomalies.csv", mime="text/csv", key=dl_key_all)
+
