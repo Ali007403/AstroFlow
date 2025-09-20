@@ -411,12 +411,15 @@ with tabs[6]:
                         buf = io.BytesIO()
                         fig.savefig(buf, format="png")
                         buf.seek(0)
-                        st.download_button(
-                            label=f"Download Image (PNG) — {r['file']} HDU {idx}",
-                            data=buf,
-                            file_name=f"{r['file']}_hdu{idx}_image.png",
-                            mime="image/png"
-                        )
+                      dl_key = make_key(r['file'], idx, 'image_download')
+st.download_button(
+    label=f"Download Image (PNG) — {r['file']} HDU {idx}",
+    data=buf,
+    file_name=f"{r['file']}_hdu{idx}_image.png",
+    mime="image/png",
+    key=dl_key
+)
+
 
                     plt.close(fig)
 
