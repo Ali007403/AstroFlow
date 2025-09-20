@@ -398,6 +398,8 @@ with tabs[6]:
                     st.subheader(f"{r['file']} (HDU {idx}) — Image")
 
                     import matplotlib.pyplot as plt
+                    import io
+
                     fig, ax = plt.subplots()
                     im = ax.imshow(hdu.data, cmap="gray", origin="lower", aspect="auto")
                     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -407,24 +409,22 @@ with tabs[6]:
 
                     # Optional PNG download
                     if enable_downloads:
-                        import io
                         buf = io.BytesIO()
                         fig.savefig(buf, format="png")
                         buf.seek(0)
+                        dl_key = make_key(r['file'], idx, 'image_download')
                         st.download_button(
                             label=f"Download Image (PNG) — {r['file']} HDU {idx}",
                             data=buf,
                             file_name=f"{r['file']}_hdu{idx}_image.png",
                             mime="image/png",
+                            key=dl_key
                         )
+
                     plt.close(fig)
-                   
 
     if not found_image:
         st.info("No 2D images found in uploaded FITS files.")
-
-
-
 
 
 # Reports tab
