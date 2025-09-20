@@ -1,3 +1,15 @@
+from FitsFlow import exporters, reporters
+
+# When user clicks "Download CSV"
+csv_data = exporters.export_csv(hdu_data)
+st.download_button("Download CSV", csv_data, file_name="astroflow_data.csv")
+
+# When user clicks "Generate Report"
+if st.button("Generate PDF Report"):
+    report_file = reporters.generate_report(plots, tables, images)
+    st.download_button("Download Report", report_file, file_name="astroflow_report.pdf")
+
+
 # app.py (fixed: unique stacked/download keys + combined molecular-band multiselect)
 import streamlit as st
 import numpy as np
