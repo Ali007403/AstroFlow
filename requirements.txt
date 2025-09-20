@@ -5,3 +5,7 @@ scipy
 matplotlib
 streamlit
 plotly
+kaleido # optional for saving plotly images
+reportlab # optional for PDF reports
+fpdf # alternative for PDF
+pytest
