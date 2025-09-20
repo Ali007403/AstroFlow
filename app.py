@@ -17,10 +17,20 @@ st.set_page_config(page_title="AstroFlow · FITSFlow", layout="wide", initial_si
 # ---------------------------
 # Helper: stable key generator
 # ---------------------------
+import hashlib
+
 def make_key(*parts):
+    """
+    Generate a stable, unique key for Streamlit widgets.
+    Combines user-provided parts with a hash to avoid collisions.
+    """
     raw = "_".join(str(p) for p in parts if p is not None)
+    # Compute short hash of raw string for guaranteed uniqueness
+    short_hash = hashlib.md5(raw.encode()).hexdigest()[:8]
+    # Combine cleaned string + hash
     key = re.sub(r'\W+', '_', raw).strip('_')
-    return key[:200]
+    return f"{key}_{short_hash}"
+
 
 # ---------------------------
 # Helper / Processing Utils
