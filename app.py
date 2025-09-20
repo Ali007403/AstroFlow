@@ -1,12 +1,4 @@
-from FitsFlow.reporters import generate_pdf_report
 
-pdf_path = generate_pdf_report(
-    output_path=tmp_pdf,
-    metadata={"title": "AstroFlow Report", "author": "FutureMind"},
-    plots=plots,
-    tables=tables,
-    images=images,
-)
 
 
 
