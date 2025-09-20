@@ -563,11 +563,14 @@ with tabs[7]:
         else:
             st.error("PDF report was not generated.")
 
+# ---------------------------
 # Anomalies tab
+# ---------------------------
 with tabs[8]:
     st.header("Anomaly Detection")
     st.markdown("Lightweight detectors: z-score outliers, local dips, spikes. Tune thresholds in the sidebar.")
 
+    # Sidebar controls for anomaly detection
     st.sidebar.markdown("Anomaly detection settings")
     z_thresh = st.sidebar.slider("Outlier z-threshold", 3, 10, 4)
     dip_window = st.sidebar.slider("Dip median window (px)", 11, 501, 101, step=2)
@@ -576,36 +579,80 @@ with tabs[8]:
     spike_std = st.sidebar.slider("Spike std-factor", 2, 20, 6)
 
     anomalies_all = []
+
     for res in results:
         if res.get("wl") is None or res.get("fl") is None:
             continue
-        wl = res["wl"]; fl = res["fl"]
+
+        wl = res["wl"]
+        fl = res["fl"]
         x_label = res.get("x_label", "Wavelength")
         y_label = res.get("y_label", "Flux")
-        params = {"z_thresh": z_thresh, "dip_window": dip_window, "dip_depth": dip_depth, "spike_window": spike_window, "spike_std": spike_std}
+
+        params = {"z_thresh": z_thresh, "dip_window": dip_window, "dip_depth": dip_depth,
+                  "spike_window": spike_window, "spike_std": spike_std}
         anoms = detect_anomalies(wl, fl, params=params)
+
+        # Add file info to each anomaly
         for a in anoms:
             a["file"] = res.get("file")
             a["hdu_index"] = res.get("hdu_index")
+
         anomalies_all += anoms
 
         st.subheader(f"{res['file']} (HDU {res.get('hdu_index')})")
-        fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} (HDU {res.get('hdu_index')})", x_label=x_label, y_label=y_label)
+
+        # Plot spectrum with anomalies
+        fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} (HDU {res.get('hdu_index')})",
+                                        x_label=x_label, y_label=y_label)
         fig = annotate_plotly(fig, anoms)
         st.plotly_chart(fig, use_container_width=True, key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot'))
 
-        if anoms:
-            st.table(pd.DataFrame(anoms)[["type", "wl", "index", "value"]].head(200))
+        # Normalize anomalies: ensure all expected keys exist
+        expected_keys = ["type", "wl", "index", "value"]
+        normalized_anoms = [{k: a.get(k, np.nan) for k in expected_keys} for a in anoms]
+
+        if normalized_anoms:
+            df_anoms = pd.DataFrame(normalized_anoms)
+            st.table(df_anoms.head(200))
+
             if enable_downloads:
+                # JSON download
                 import json
-                dl_key = make_key(res['file'], res.get('hdu_index'), 'anoms_json')
-                st.download_button(f"Download anomalies JSON - {res['file']}", json.dumps(anoms, indent=2).encode('utf-8'), file_name=f"{res['file']}_hdu{res.get('hdu_index')}_anomalies.json", mime="application/json", key=dl_key)
+                dl_key_json = make_key(res['file'], res.get('hdu_index'), 'anoms_json')
+                st.download_button(
+                    f"Download anomalies JSON - {res['file']}",
+                    json.dumps(anoms, indent=2).encode('utf-8'),
+                    file_name=f"{res['file']}_hdu{res.get('hdu_index')}_anomalies.json",
+                    mime="application/json",
+                    key=dl_key_json
+                )
+
+                # CSV download
+                dl_key_csv = make_key(res['file'], res.get('hdu_index'), 'anoms_csv')
+                st.download_button(
+                    f"Download anomalies CSV - {res['file']}",
+                    df_anoms.to_csv(index=False).encode('utf-8'),
+                    file_name=f"{res['file']}_hdu{res.get('hdu_index')}_anomalies.csv",
+                    mime="text/csv",
+                    key=dl_key_csv
+                )
         else:
             st.write("No anomalies detected for this spectrum.")
 
+    # Summary of all anomalies
     st.markdown("### Summary")
-    st.write(f"Total anomalies detected: {len(anomalies_all)}")
+    st.write(f"Total anomalies detected across all files: {len(anomalies_all)}")
+
     if anomalies_all and enable_downloads:
-        df_an = pd.DataFrame(anomalies_all)
-        dl_key_all = make_key('all','anomalies','csv')
-        st.download_button("Download all anomalies (CSV)", df_an.to_csv(index=False).encode('utf-8'), file_name="astroflow_anomalies.csv", mime='text/csv', key=dl_key_all)
+        # Normalize all anomalies across all files
+        normalized_all = [{k: a.get(k, np.nan) for k in expected_keys + ["file", "hdu_index"]} for a in anomalies_all]
+        df_all = pd.DataFrame(normalized_all)
+        dl_key_all = make_key('all', 'anomalies', 'csv')
+        st.download_button(
+            "Download all anomalies (CSV)",
+            df_all.to_csv(index=False).encode('utf-8'),
+            file_name="astroflow_anomalies_all.csv",
+            mime='text/csv',
+            key=dl_key_all
+        )
