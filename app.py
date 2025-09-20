@@ -207,7 +207,17 @@ if len(results) == 0:
     st.error("No spectra could be extracted from uploaded files. You may upload pre-processed wavelength+flux CSVs.")
     st.stop()
 
-tabs = st.tabs(["Raw Spectrum", "Smoothed", "Molecule Detection", "Stacked", "Data Table", "Downloads"])
+tabs = st.tabs([
+    "Raw Spectrum",
+    "Smoothed",
+    "Molecule Detection",
+    "Stacked",
+    "Data Table",
+    "Downloads",
+    "Images",
+    "Reports"
+])
+
 
 def plot_spectrum_interactive(wl, fl, fl_smooth=None, err=None, title="Spectrum", bands=None, show_bands_flag=True, show_error=False):
     fig = go.Figure()
