@@ -493,14 +493,17 @@ with tabs[7]:
             images=images,
         )
 
-        # Provide download
-        with open(pdf_path, "rb") as f:
-            st.download_button(
-                label="Download PDF Report",
-                data=f,
-                file_name="astroflow_report.pdf",
-                mime="application/pdf",
-            )
+       # Provide download with unique key
+with open(pdf_path, "rb") as f:
+    dl_key = make_key("report_pdf", time.time())  # unique key ensures no duplicate
+    st.download_button(
+        label="Download PDF Report",
+        data=f,
+        file_name="astroflow_report.pdf",
+        mime="application/pdf",
+        key=dl_key
+    )
+
 
 
 
