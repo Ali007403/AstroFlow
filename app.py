@@ -409,3 +409,66 @@ with tabs[6]:
     if not found_image:
         st.info("No 2D images found in uploaded FITS files.")
 
+# Reports tab
+with tabs[7]:
+    st.header("Generate PDF Report")
+    st.markdown("Compile spectra, images, and tables into a single PDF.")
+
+    if st.button("Generate Report"):
+        import tempfile, os
+        tmp_pdf = os.path.join(tempfile.gettempdir(), "astroflow_report.pdf")
+
+        # Collect assets for the report
+        plots = []
+        images = []
+        tables = []
+
+        # Save example spectra plots as PNGs
+        for res in results:
+            wl, fl = res["wl"], res["fl"]
+            fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} HDU {res['hdu_index']}")
+            import io
+            buf = io.BytesIO()
+            fig.write_image(buf, format="png")
+            buf.seek(0)
+            img_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res['hdu_index']}_spectrum.png")
+            with open(img_path, "wb") as f:
+                f.write(buf.read())
+            plots.append(img_path)
+
+            # Save CSV for each
+            df = pd.DataFrame({"wavelength": wl, "flux": fl})
+            csv_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res['hdu_index']}.csv")
+            df.to_csv(csv_path, index=False)
+            tables.append(csv_path)
+
+        # Collect 2D images
+        for r in results:
+            with fits.open(r["path"], memmap=False) as hdul:
+                for idx, hdu in enumerate(hdul):
+                    if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
+                        import matplotlib.pyplot as plt
+                        img_path = os.path.join(tempfile.gettempdir(), f"{r['file']}_hdu{idx}_image.png")
+                        plt.imsave(img_path, hdu.data, cmap="gray", origin="lower")
+                        images.append(img_path)
+
+        # Call reporter
+        from FitsFlow.reporters import generate_pdf_report
+        pdf_path = generate_pdf_report(
+            output_path=tmp_pdf,
+            metadata={"title": "AstroFlow Report"},
+            plots=plots,
+            tables=tables,
+            images=images,
+        )
+
+        # Provide download
+        with open(pdf_path, "rb") as f:
+            st.download_button(
+                label="Download PDF Report",
+                data=f,
+                file_name="astroflow_report.pdf",
+                mime="application/pdf",
+            )
+
+
