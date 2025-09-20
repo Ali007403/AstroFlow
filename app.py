@@ -436,16 +436,22 @@ with tabs[6]:
         st.info("No 2D images found in uploaded FITS files.")
 
 
+# ---------------------------
 # Reports tab
+# ---------------------------
 with tabs[7]:
     st.header("Generate PDF Report")
     st.markdown("Compile spectra, images, and tables into a single PDF.")
 
     if st.button("Generate Report"):
-        import tempfile, os
+        import tempfile
+        import os
+        import io
+        import matplotlib.pyplot as plt
+        import plotly.io as pio
+
         tmp_pdf = os.path.join(tempfile.gettempdir(), "astroflow_report.pdf")
 
-        # Collect assets for the report
         plots = []
         images = []
         tables = []
@@ -454,54 +460,54 @@ with tabs[7]:
         for res in results:
             wl, fl = res["wl"], res["fl"]
             fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} HDU {res['hdu_index']}")
-            import io
             buf = io.BytesIO()
-           import plotly.io as pio
-           buf = io.BytesIO()
-           buf.write(pio.to_image(fig, format="png"))
-           buf.seek(0)
+            try:
+                # Use Kaleido engine for saving Plotly figures
+                pio.write_image(fig, buf, format="png", engine="kaleido")
+            except Exception as e:
+                st.warning(f"Failed to save Plotly figure for {res['file']} HDU {res['hdu_index']}: {e}")
+                continue
+            buf.seek(0)
             img_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res['hdu_index']}_spectrum.png")
             with open(img_path, "wb") as f:
                 f.write(buf.read())
             plots.append(img_path)
 
-            # Save CSV for each
+            # Save CSV for each spectrum
             df = pd.DataFrame({"wavelength": wl, "flux": fl})
             csv_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res['hdu_index']}.csv")
             df.to_csv(csv_path, index=False)
             tables.append(csv_path)
 
-        # Collect 2D images
+        # Save 2D images from FITS HDUs
         for r in results:
             with fits.open(r["path"], memmap=False) as hdul:
                 for idx, hdu in enumerate(hdul):
                     if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
-                        import matplotlib.pyplot as plt
                         img_path = os.path.join(tempfile.gettempdir(), f"{r['file']}_hdu{idx}_image.png")
                         plt.imsave(img_path, hdu.data, cmap="gray", origin="lower")
                         images.append(img_path)
 
-        # Call reporter
+        # Generate PDF using reporter
         from FitsFlow.reporters import generate_pdf_report
-        pdf_path = generate_pdf_report(
-            output_path=tmp_pdf,
-            metadata={"title": "AstroFlow Report"},
-            plots=plots,
-            tables=tables,
-            images=images,
-        )
 
-       # Provide download with unique key
-with open(pdf_path, "rb") as f:
-    dl_key = make_key("report_pdf", time.time())  # unique key ensures no duplicate
-    st.download_button(
-        label="Download PDF Report",
-        data=f,
-        file_name="astroflow_report.pdf",
-        mime="application/pdf",
-        key=dl_key
-    )
+        try:
+            pdf_path = generate_pdf_report(
+                output_path=tmp_pdf,
+                metadata={"title": "AstroFlow Report"},
+                plots=plots,
+                tables=tables,
+                images=images,
+            )
 
-
-
-
+            # Provide download button with unique key
+            with open(pdf_path, "rb") as f:
+                st.download_button(
+                    label="Download PDF Report",
+                    data=f,
+                    file_name="astroflow_report.pdf",
+                    mime="application/pdf",
+                    key=f"report_download_{time.time()}"  # unique key
+                )
+        except Exception as e:
+            st.error(f"Failed to generate PDF report: {e}")
