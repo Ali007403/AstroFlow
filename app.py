@@ -445,7 +445,6 @@ with tabs[7]:
         for res in results:
             wl, fl = res["wl"], res["fl"]
             fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} HDU {res['hdu_index']}")
-            import io
             buf = io.BytesIO()
             fig.write_image(buf, format="png")
             buf.seek(0)
@@ -480,12 +479,13 @@ with tabs[7]:
             images=images,
         )
 
-        # Provide download
+        # Provide download (unique key)
+        dl_key = make_key('astroflow', 'report', 'pdf_download')
         with open(pdf_path, "rb") as f:
             st.download_button(
                 label="Download PDF Report",
                 data=f,
                 file_name="astroflow_report.pdf",
                 mime="application/pdf",
+                key=dl_key
             )
-
