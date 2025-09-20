@@ -406,7 +406,8 @@ with tabs[6]:
                         import io
                         import PIL.Image as Image
                         buf = io.BytesIO()
-                        plt.savefig(buf, format="png")
+                        fig.savefig(buf, format="png")
+                        fig.savefig(buf, format="png")
                         buf.seek(0)
                         st.download_button(
                             label=f"Download Image (PNG) — {r['file']} HDU {idx}",
