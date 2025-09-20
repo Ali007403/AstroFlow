@@ -384,80 +384,62 @@ with tabs[5]:
 st.sidebar.success("Ready. Use the tabs to explore raw and processed data.")
 st.caption("AstroFlow · FITSFlow MVP — upload data, toggle options, export results.")
 
-# ---------------------------
-# Optimized Images tab
-# ---------------------------
+# Images tab
 with tabs[6]:
     st.header("FITS Images")
     found_image = False
+    for r in results:
+        # Open the FITS again for image HDUs
+        with fits.open(r["path"], memmap=False) as hdul:
+            for idx, hdu in enumerate(hdul):
+                if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
+                    found_image = True
+                    st.subheader(f"{r['file']} (HDU {idx}) — Image")
+                    import matplotlib.pyplot as plt
+                    fig, ax = plt.subplots()
+                    im = ax.imshow(hdu.data, cmap="gray", origin="lower", aspect="auto")
+                    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    st.pyplot(fig)
 
-    # Initialize session_state for storing figures
-    if 'image_figs' not in st.session_state:
-        st.session_state['image_figs'] = {}
-
-        for r in results:
-            with fits.open(r["path"], memmap=False) as hdul:
-                for idx, hdu in enumerate(hdul):
-                    if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
-                        found_image = True
-                        key_id = make_key(r['file'], idx, 'image_plot')
-
-                        # Generate figure once
-                        import matplotlib.pyplot as plt
-                        fig, ax = plt.subplots()
-                        im = ax.imshow(hdu.data, cmap="gray", origin="lower", aspect="auto")
-                        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                        st.session_state['image_figs'][key_id] = fig
-                        plt.close(fig)
-
-    # Render figures from session_state
-    if st.session_state['image_figs']:
-        for key_id, fig in st.session_state['image_figs'].items():
-            # Parse filename & HDU index from key_id for display
-            parts = key_id.split('_')
-            file_label = parts[0]
-            hdu_idx = parts[1]
-            st.subheader(f"{file_label} (HDU {hdu_idx}) — Image")
-            st.pyplot(fig, key=key_id)
-
-            # Download button (unique key)
-            if enable_downloads:
-                import io
-                buf = io.BytesIO()
-                fig.savefig(buf, format="png")
-                buf.seek(0)
-                dl_key = make_key(file_label, hdu_idx, 'image_download')
-                st.download_button(
-                    label=f"Download Image (PNG) — {file_label} HDU {hdu_idx}",
-                    data=buf,
-                    file_name=f"{file_label}_hdu{hdu_idx}_image.png",
-                    mime="image/png",
-                    key=dl_key
-                )
+                    # Export button
+                    if enable_downloads:
+                        import io
+                        import PIL.Image as Image
+                        buf = io.BytesIO()
+                        plt.savefig(buf, format="png")
+                        buf.seek(0)
+                        st.download_button(
+                            label=f"Download Image (PNG) — {r['file']} HDU {idx}",
+                            data=buf,
+                            file_name=f"{r['file']}_hdu{idx}_image.png",
+                            mime="image/png",
+                        )
+                    plt.close(fig)
 
     if not found_image:
         st.info("No 2D images found in uploaded FITS files.")
 
 
-# ---------------------------
-# Reports tab (Streamlit-safe)
-# ---------------------------
+
+# Reports tab
 with tabs[7]:
     st.header("Generate PDF Report")
     st.markdown("Compile spectra, images, and tables into a single PDF.")
 
-    # Button triggers report generation
-    if st.button("Generate Report", key="generate_report_btn"):
-        import tempfile
+    if st.button("Generate Report"):
+        import tempfile, os
         tmp_pdf = os.path.join(tempfile.gettempdir(), "astroflow_report.pdf")
 
         # Collect assets for the report
-        plots, images, tables = [], [], []
+        plots = []
+        images = []
+        tables = []
 
-        # Save spectra plots as PNG
+        # Save example spectra plots as PNGs
         for res in results:
             wl, fl = res["wl"], res["fl"]
             fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} HDU {res['hdu_index']}")
+            import io
             buf = io.BytesIO()
             fig.write_image(buf, format="png")
             buf.seek(0)
@@ -466,7 +448,7 @@ with tabs[7]:
                 f.write(buf.read())
             plots.append(img_path)
 
-            # Save CSV for each spectrum
+            # Save CSV for each
             df = pd.DataFrame({"wavelength": wl, "flux": fl})
             csv_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res['hdu_index']}.csv")
             df.to_csv(csv_path, index=False)
@@ -477,12 +459,12 @@ with tabs[7]:
             with fits.open(r["path"], memmap=False) as hdul:
                 for idx, hdu in enumerate(hdul):
                     if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
-                        img_path = os.path.join(tempfile.gettempdir(), f"{r['file']}_hdu{idx}_image.png")
                         import matplotlib.pyplot as plt
+                        img_path = os.path.join(tempfile.gettempdir(), f"{r['file']}_hdu{idx}_image.png")
                         plt.imsave(img_path, hdu.data, cmap="gray", origin="lower")
                         images.append(img_path)
 
-        # Generate PDF
+        # Call reporter
         from FitsFlow.reporters import generate_pdf_report
         pdf_path = generate_pdf_report(
             output_path=tmp_pdf,
@@ -492,16 +474,12 @@ with tabs[7]:
             images=images,
         )
 
-        # Store PDF in session_state for safe download
+        # Provide download
         with open(pdf_path, "rb") as f:
-            st.session_state['last_pdf'] = f.read()
+            st.download_button(
+                label="Download PDF Report",
+                data=f,
+                file_name="astroflow_report.pdf",
+                mime="application/pdf",
+            )
 
-    # Always show download button if PDF exists
-    if 'last_pdf' in st.session_state:
-        st.download_button(
-            label="Download PDF Report",
-            data=st.session_state['last_pdf'],
-            file_name="astroflow_report.pdf",
-            mime="application/pdf",
-            key="download_pdf_report"
-        )
