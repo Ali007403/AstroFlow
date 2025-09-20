@@ -384,51 +384,40 @@ with tabs[5]:
 st.sidebar.success("Ready. Use the tabs to explore raw and processed data.")
 st.caption("AstroFlow · FITSFlow MVP — upload data, toggle options, export results.")
 
-import hashlib
-
 # Images tab
 with tabs[6]:
     st.header("FITS Images")
     found_image = False
-
     for r in results:
+        # Open the FITS again for image HDUs
         with fits.open(r["path"], memmap=False) as hdul:
             for idx, hdu in enumerate(hdul):
                 if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
                     found_image = True
                     st.subheader(f"{r['file']} (HDU {idx}) — Image")
-
                     import matplotlib.pyplot as plt
-                    import io
-
                     fig, ax = plt.subplots()
                     im = ax.imshow(hdu.data, cmap="gray", origin="lower", aspect="auto")
                     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
                     st.pyplot(fig)
 
+                    # Export button
                     if enable_downloads:
+                        import io
+                        import PIL.Image as Image
                         buf = io.BytesIO()
-                        fig.savefig(buf, format="png")
+                        plt.savefig(buf, format="png")
                         buf.seek(0)
-
-                        # Make a truly unique key: file name + HDU index + hash of file path + "images_tab"
-                        path_hash = hashlib.md5(r["path"].encode()).hexdigest()[:8]
-                        dl_key = f"{r['file']}_hdu{idx}_img_{path_hash}_images_tab"
-
                         st.download_button(
                             label=f"Download Image (PNG) — {r['file']} HDU {idx}",
                             data=buf,
                             file_name=f"{r['file']}_hdu{idx}_image.png",
                             mime="image/png",
-                            key=dl_key
                         )
-
                     plt.close(fig)
 
     if not found_image:
         st.info("No 2D images found in uploaded FITS files.")
-
 
 # Reports tab
 with tabs[7]:
@@ -448,6 +437,7 @@ with tabs[7]:
         for res in results:
             wl, fl = res["wl"], res["fl"]
             fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} HDU {res['hdu_index']}")
+            import io
             buf = io.BytesIO()
             fig.write_image(buf, format="png")
             buf.seek(0)
@@ -482,13 +472,14 @@ with tabs[7]:
             images=images,
         )
 
-        # Provide download (unique key)
-        dl_key = make_key('astroflow', 'report', 'pdf_download')
+        # Provide download
         with open(pdf_path, "rb") as f:
             st.download_button(
                 label="Download PDF Report",
                 data=f,
                 file_name="astroflow_report.pdf",
                 mime="application/pdf",
-                key=dl_key
             )
+
+
+
