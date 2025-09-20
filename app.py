@@ -384,44 +384,41 @@ with tabs[5]:
 st.sidebar.success("Ready. Use the tabs to explore raw and processed data.")
 st.caption("AstroFlow · FITSFlow MVP — upload data, toggle options, export results.")
 
-# Images tab (fixed, Streamlit-safe)
+# Images tab
 with tabs[6]:
     st.header("FITS Images")
     found_image = False
-
     for r in results:
         # Open the FITS again for image HDUs
         with fits.open(r["path"], memmap=False) as hdul:
             for idx, hdu in enumerate(hdul):
                 if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
                     found_image = True
-                    sublabel = f"{r['file']} (HDU {idx}) — Image"
-                    st.subheader(sublabel)
-
+                    st.subheader(f"{r['file']} (HDU {idx}) — Image")
                     import matplotlib.pyplot as plt
                     fig, ax = plt.subplots()
                     im = ax.imshow(hdu.data, cmap="gray", origin="lower", aspect="auto")
                     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    st.pyplot(fig)
 
-                    # Use a unique key for Streamlit plotting
-                    st.pyplot(fig, key=make_key(r['file'], idx, 'image_plot'))
-
+                    # Export button
                     if enable_downloads:
                         import io
+                        import PIL.Image as Image
                         buf = io.BytesIO()
-                        fig.savefig(buf, format="png")
+                        plt.savefig(buf, format="png")
                         buf.seek(0)
                         st.download_button(
                             label=f"Download Image (PNG) — {r['file']} HDU {idx}",
                             data=buf,
                             file_name=f"{r['file']}_hdu{idx}_image.png",
                             mime="image/png",
-                            key=make_key(r['file'], idx, 'image_download')
                         )
                     plt.close(fig)
 
     if not found_image:
         st.info("No 2D images found in uploaded FITS files.")
+
 
 
 
