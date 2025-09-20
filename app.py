@@ -418,12 +418,23 @@ with tabs[6]:
                         buf = io.BytesIO()
                         plt.savefig(buf, format="png")
                         buf.seek(0)
-                        st.download_button(
-                            label=f"Download Image (PNG) — {r['file']} HDU {idx}",
-                            data=buf,
-                            file_name=f"{r['file']}_hdu{idx}_image.png",
-                            mime="image/png",
-                        )
+                        # Optional PNG download
+if enable_downloads:
+    import io
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    buf.seek(0)
+    # Wrap in an expander to avoid duplicate element context
+    with st.expander(f"{r['file']} HDU {idx} - Image Download", expanded=False):
+        dl_key = make_key(r['file'], idx, 'image_download', time.time())  # ensure unique key
+        st.download_button(
+            label=f"Download Image (PNG) — {r['file']} HDU {idx}",
+            data=buf,
+            file_name=f"{r['file']}_hdu{idx}_image.png",
+            mime="image/png",
+            key=dl_key
+        )
+
                     plt.close(fig)
 
     if not found_image:
