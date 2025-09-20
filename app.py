@@ -1,8 +1,8 @@
-# app.py (updated, drop-in replacement)
+# app.py (updated with dynamic axis labels)
 from FitsFlow.csv_handler import ingest_csv_file
 from FitsFlow.detectors import detect_anomalies, annotate_plotly
-from FitsFlow.fields import detect_data_type, map_columns   # optional if needed in UI
-from FitsFlow.reporters import generate_pdf_report  # reporter module (ensure reporters.py exists)
+from FitsFlow.fields import detect_data_type, map_columns
+from FitsFlow.reporters import generate_pdf_report
 
 import streamlit as st
 import numpy as np
@@ -20,10 +20,6 @@ st.set_page_config(page_title="AstroFlow · FITSFlow", layout="wide", initial_si
 # Helper: stable key generator
 # ---------------------------
 def make_key(*parts):
-    """
-    Generate a stable, unique key for Streamlit widgets.
-    Combines user-provided parts with a hash to avoid collisions.
-    """
     raw = "_".join(str(p) for p in parts if p is not None)
     short_hash = hashlib.md5(raw.encode()).hexdigest()[:8]
     key = re.sub(r'\W+', '_', raw).strip('_')
@@ -41,23 +37,17 @@ def safe_names(arr):
     except Exception:
         return []
 
-def find_wl_flux_from_table(table):
-    names = safe_names(table)
-    wl_col = next((c for c in WL_COLS if c in names), None)
-    fl_col = next((c for c in FLUX_COLS if c in names), None)
-    return wl_col, fl_col
-
 def try_extract_spectrum(hdu):
     """
-    Try to extract a 1D spectrum (wavelength, flux) from an HDU.
-    Uses table-name heuristics via FitsFlow.fields.map_columns when possible.
-    Returns (wl_array, fl_array) or (None, None) if not found.
+    Returns: (wl_array, fl_array, labels_dict)
+    labels_dict contains keys: x_label, y_label
     """
     data = hdu.data
+    default_labels = {"x_label": "Wavelength", "y_label": "Flux"}
     if data is None:
-        return None, None
+        return None, None, default_labels
 
-    # Table-like HDU (FITS BinaryTable / TableHDU)
+    # Table-like HDU -> try pandas + map_columns
     try:
         if hasattr(data, 'names') or (hasattr(data, 'dtype') and data.dtype.names is not None):
             import pandas as _pd
@@ -70,38 +60,39 @@ def try_extract_spectrum(hdu):
                 fl = _pd.to_numeric(df[fl_col], errors="coerce").to_numpy(dtype=float)
                 mask = np.isfinite(wl) & np.isfinite(fl)
                 if np.any(mask):
-                    return wl[mask], fl[mask]
+                    labels = {"x_label": wl_col, "y_label": fl_col}
+                    return wl[mask], fl[mask], labels
 
-            # fallback: first two numeric columns (legacy)
+            # fallback: first two numeric columns
             names = safe_names(data)
             nums = [n for n in names if np.issubdtype(data[n].dtype, np.number)]
             if len(nums) >= 2:
                 wl = np.array(data[nums[0]]).astype(float).flatten()
                 fl = np.array(data[nums[1]]).astype(float).flatten()
                 mask = np.isfinite(wl) & np.isfinite(fl)
-                return wl[mask], fl[mask]
+                if np.any(mask):
+                    labels = {"x_label": nums[0], "y_label": nums[1]}
+                    return wl[mask], fl[mask], labels
     except Exception:
-        # fall through to image-like handling
         pass
 
-    # Image-like HDU
+    # Image-like HDU: collapse to 1D or return pixel index
     try:
         arr = np.array(data)
         if arr.ndim == 1:
             wl = np.arange(arr.size)
             fl = arr.astype(float)
             mask = np.isfinite(fl)
-            return wl[mask], fl[mask]
+            return wl[mask], fl[mask], {"x_label": "Index", "y_label": "Value"}
         elif arr.ndim == 2:
-            # collapse along rows -> 1D spectrum approximation
             fl = np.nanmean(arr, axis=0)
             wl = np.arange(fl.size)
             mask = np.isfinite(fl)
-            return wl[mask], fl[mask]
+            return wl[mask], fl[mask], {"x_label": "Pixel", "y_label": "Mean(pixel rows)"}
     except Exception:
         pass
 
-    return None, None
+    return None, None, default_labels
 
 def interp_to_reference(wl, fl, ref_wl):
     try:
@@ -132,12 +123,10 @@ def calc_snr_on_band(ref_wl, ref_flux, band_range: Tuple[float,float]):
         return 0.0
     return float(signal / noise)
 
-# expand molecular band list here if you like
 DEFAULT_BANDS = {
     "H2O": (1.35, 1.45),
     "CH4": (1.60, 1.72),
     "CO2": (2.65, 2.75),
-    # add more bands as needed
 }
 
 # ---------------------------
@@ -197,33 +186,41 @@ for i, up in enumerate(uploaded, start=1):
     progress.progress(int((i-1)/nfiles*100))
     fname = up.name
     dst = os.path.join(tmpdir, fname)
-    # persist uploaded file to tmpdir
     with open(dst, "wb") as f:
         f.write(up.getvalue())
     file_paths.append(dst)
 
     lower = fname.lower()
-    # If CSV, use csv_handler.ingest_csv_file
+    # CSV handling
     if lower.endswith(".csv"):
         try:
-            csv_outputs = ingest_csv_file(dst, filename=fname)  # returns list of result dicts
+            csv_outputs = ingest_csv_file(dst, filename=fname)
             for out in csv_outputs:
-                # ensure arrays are numpy arrays (or None)
                 if out.get("wl") is not None:
                     out["wl"] = np.asarray(out["wl"], dtype=float)
                 if out.get("fl") is not None:
                     out["fl"] = np.asarray(out["fl"], dtype=float)
+                # derive labels from orig_df if possible
+                if out.get("orig_df") is not None:
+                    mapping = map_columns(out["orig_df"])
+                    x_label = mapping.get("wavelength") or mapping.get("time") or mapping.get("x") or mapping.get("lat") or "X"
+                    y_label = mapping.get("flux") or mapping.get("value") or mapping.get("y") or mapping.get("temp") or "Y"
+                    out.setdefault("x_label", x_label)
+                    out.setdefault("y_label", y_label)
+                else:
+                    out.setdefault("x_label", "Wavelength")
+                    out.setdefault("y_label", "Flux")
                 results.append(out)
         except Exception as e:
             st.error(f"Failed to parse CSV {fname}: {e}")
         continue
 
-    # Otherwise attempt to open as FITS
+    # FITS handling
     try:
         with fits.open(dst, memmap=False) as hdul:
             found_any = False
             for idx, hdu in enumerate(hdul):
-                wl, fl = try_extract_spectrum(hdu)
+                wl, fl, labels = try_extract_spectrum(hdu)
                 if wl is None:
                     continue
                 found_any = True
@@ -235,10 +232,11 @@ for i, up in enumerate(uploaded, start=1):
                     "header": dict(hdu.header) if hasattr(hdu, "header") else {},
                     "wl": np.array(wl, dtype=float),
                     "fl": np.array(fl, dtype=float),
-                    "err": err
+                    "err": err,
+                    "x_label": labels.get("x_label", "Wavelength"),
+                    "y_label": labels.get("y_label", "Flux"),
                 })
             if not found_any:
-                # still record the file so its images/tables can be used by Images/Reports tabs
                 results.append({
                     "file": fname,
                     "path": dst,
@@ -246,7 +244,9 @@ for i, up in enumerate(uploaded, start=1):
                     "header": {},
                     "wl": None,
                     "fl": None,
-                    "err": None
+                    "err": None,
+                    "x_label": "Wavelength",
+                    "y_label": "Flux",
                 })
     except Exception as e:
         st.error(f"Failed to open {fname}: {e}")
@@ -270,7 +270,10 @@ tabs = st.tabs([
     "Anomalies"
 ])
 
-def plot_spectrum_interactive(wl, fl, fl_smooth=None, err=None, title="Spectrum", bands=None, show_bands_flag=True, show_error=False):
+def plot_spectrum_interactive(
+    wl, fl, fl_smooth=None, err=None, title="Spectrum", bands=None,
+    show_bands_flag=True, show_error=False, x_label="Wavelength", y_label="Flux"
+):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=wl, y=fl, mode='lines', name='raw', line=dict(color='rgba(0,150,200,0.7)')))
     if fl_smooth is not None:
@@ -281,14 +284,13 @@ def plot_spectrum_interactive(wl, fl, fl_smooth=None, err=None, title="Spectrum"
     if show_bands_flag and bands:
         for mol,(a,b) in bands.items():
             fig.add_vrect(x0=a, x1=b, fillcolor="LightSkyBlue", opacity=0.25, layer="below", line_width=0, annotation_text=mol, annotation_position="top left")
-    fig.update_layout(title=title, xaxis_title="Wavelength", yaxis_title="Flux", template="plotly_white", height=400)
+    fig.update_layout(title=title, xaxis_title=x_label, yaxis_title=y_label, template="plotly_white", height=400)
     return fig
 
 # Raw tab
 with tabs[0]:
     st.header("Raw Spectrum")
     for res in results:
-        # skip entries with no 1D spectrum (e.g., CSV table-only or image-only FITS)
         if res.get("wl") is None or res.get("fl") is None:
             continue
 
@@ -299,28 +301,19 @@ with tabs[0]:
             keys_to_show = {k: hdr[k] for k in list(hdr.keys())[:20]}
             st.json(keys_to_show)
 
-            wl = res['wl']
-            fl = res['fl']
-            err = res.get('err')
+            wl = res['wl']; fl = res['fl']; err = res.get('err')
+            x_label = res.get("x_label", "Wavelength")
+            y_label = res.get("y_label", "Flux")
 
-            fig = plot_spectrum_interactive(
-                wl, fl, fl_smooth=None, err=err,
-                title=label, bands=None, show_bands_flag=False
-            )
+            fig = plot_spectrum_interactive(wl, fl, fl_smooth=None, err=err, title=label, bands=None, show_bands_flag=False, x_label=x_label, y_label=y_label)
             chart_key = make_key(res['file'], res['hdu_index'], 'plot', 'raw')
             st.plotly_chart(fig, use_container_width=True, key=chart_key)
-            st.write(f"Data points: {len(wl)} | Wavelength range: {wl.min():.3g} – {wl.max():.3g}")
+            st.write(f"Data points: {len(wl)} | {x_label} range: {wl.min():.3g} – {wl.max():.3g}")
 
             if enable_downloads:
-                df = pd.DataFrame({"wavelength": wl, "flux": fl})
+                df = pd.DataFrame({x_label: wl, y_label: fl})
                 dl_key = make_key(res['file'], res['hdu_index'], 'download', 'raw_csv')
-                st.download_button(
-                    f"Download CSV (raw) - {res['file']}",
-                    df.to_csv(index=False).encode('utf-8'),
-                    file_name=f"{res['file']}_hdu{res['hdu_index']}_raw.csv",
-                    mime='text/csv',
-                    key=dl_key
-                )
+                st.download_button(f"Download CSV (raw) - {res['file']}", df.to_csv(index=False).encode('utf-8'), file_name=f"{res['file']}_hdu{res['hdu_index']}_raw.csv", mime='text/csv', key=dl_key)
 
 # Smoothed tab
 with tabs[1]:
@@ -331,17 +324,19 @@ with tabs[1]:
         label = f"{res['file']} (HDU {res['hdu_index']})"
         with st.expander(label, expanded=False):
             wl = res['wl']; fl = res['fl']; err = res.get('err')
+            x_label = res.get("x_label", "Wavelength")
+            y_label = res.get("y_label", "Flux")
             if raw_only:
                 st.info("Raw-only mode enabled. Toggle off to see smoothing.")
                 fl_smooth = None
             else:
                 fl_proc = fl.copy()
                 fl_smooth = smooth_flux(fl_proc, smoothing_window, polyorder) if smoothing_enabled else None
-            fig = plot_spectrum_interactive(wl, fl, fl_smooth=fl_smooth, err=err, title=label, bands=None, show_bands_flag=False, show_error=show_errorbars)
+            fig = plot_spectrum_interactive(wl, fl, fl_smooth=fl_smooth, err=err, title=label, bands=None, show_bands_flag=False, show_error=show_errorbars, x_label=x_label, y_label=y_label)
             chart_key = make_key(res['file'], res['hdu_index'], 'plot', 'smooth')
             st.plotly_chart(fig, use_container_width=True, key=chart_key)
             if enable_downloads:
-                df = pd.DataFrame({"wavelength": wl, "flux": fl, "flux_smoothed": fl_smooth if fl_smooth is not None else fl})
+                df = pd.DataFrame({x_label: wl, y_label: fl, f"{y_label}_smoothed": fl_smooth if fl_smooth is not None else fl})
                 dl_key = make_key(res['file'], res['hdu_index'], 'download', 'smooth_csv')
                 st.download_button(f"Download CSV (smoothed) - {res['file']}", df.to_csv(index=False).encode('utf-8'), file_name=f"{res['file']}_hdu{res['hdu_index']}_smoothed.csv", mime='text/csv', key=dl_key)
 
@@ -356,11 +351,13 @@ with tabs[2]:
         label = f"{res['file']} (HDU {res['hdu_index']})"
         with st.expander(label, expanded=False):
             wl = res['wl']; fl = res['fl']
+            x_label = res.get("x_label", "Wavelength")
+            y_label = res.get("y_label", "Flux")
             if raw_only:
                 fl_proc = fl
             else:
                 fl_proc = smooth_flux(fl, smoothing_window, polyorder) if smoothing_enabled else fl
-            fig = plot_spectrum_interactive(wl, fl, fl_smooth=fl_proc, err=res.get('err'), title=label, bands=active_bands, show_bands_flag=show_bands and not raw_only, show_error=show_errorbars)
+            fig = plot_spectrum_interactive(wl, fl, fl_smooth=fl_proc, err=res.get('err'), title=label, bands=active_bands, show_bands_flag=show_bands and not raw_only, show_error=show_errorbars, x_label=x_label, y_label=y_label)
             chart_key = make_key(res['file'], res['hdu_index'], 'plot', 'mol')
             st.plotly_chart(fig, use_container_width=True, key=chart_key)
             if show_snr and active_bands:
@@ -368,18 +365,20 @@ with tabs[2]:
                 st.subheader("SNR (approx)")
                 st.json({k: float(np.round(v,3)) for k,v in snr_table.items()})
             if enable_downloads:
-                df = pd.DataFrame({"wavelength": wl, "flux": fl, "flux_processed": fl_proc})
+                df = pd.DataFrame({x_label: wl, y_label: fl, f"{y_label}_processed": fl_proc})
                 dl_key = make_key(res['file'], res['hdu_index'], 'download', 'mol_csv')
                 st.download_button(f"Download CSV (processed) - {res['file']}", df.to_csv(index=False).encode('utf-8'), file_name=f"{res['file']}_hdu{res['hdu_index']}_processed.csv", mime='text/csv', key=dl_key)
 
 # Stacked tab
 with tabs[3]:
     st.header("Stacked Spectrum")
-    # filter to only results with spectra
     spec_results = [r for r in results if r.get("wl") is not None and r.get("fl") is not None]
     if len(spec_results) < 2 or not stack_enabled:
         st.info("Upload multiple spectra and enable stacking to see combined results.")
     else:
+        # pick labels from first spectrum (best-effort)
+        x_label = spec_results[0].get("x_label", "Wavelength")
+        y_label = spec_results[0].get("y_label", "Flux")
         min_wl = min(np.nanmin(r['wl']) for r in spec_results)
         max_wl = max(np.nanmax(r['wl']) for r in spec_results)
         ref_wl = np.linspace(min_wl, max_wl, 2000)
@@ -390,7 +389,7 @@ with tabs[3]:
             stacked_smooth = smooth_flux(stacked, smoothing_window, polyorder)
         else:
             stacked_smooth = stacked
-        if True and not raw_only:  # normalization on for visual clarity
+        if True and not raw_only:
             if np.nanmax(stacked_smooth) != np.nanmin(stacked_smooth):
                 stacked_norm = (stacked - np.nanmin(stacked)) / (np.nanmax(stacked) - np.nanmin(stacked))
                 stacked_smooth = (stacked_smooth - np.nanmin(stacked_smooth)) / (np.nanmax(stacked_smooth) - np.nanmin(stacked_smooth)) if np.nanmax(stacked_smooth) != np.nanmin(stacked_smooth) else stacked_smooth
@@ -404,13 +403,13 @@ with tabs[3]:
         if "CH4" in selected_bands: bands_for_plot["CH4"] = DEFAULT_BANDS["CH4"]
         if "CO2" in selected_bands: bands_for_plot["CO2"] = DEFAULT_BANDS["CO2"]
 
-        fig_st = plot_spectrum_interactive(ref_wl, np.nan_to_num(stacked_norm), fl_smooth=stacked_smooth, err=None, title="Stacked Spectrum", bands=bands_for_plot, show_bands_flag=show_bands and not raw_only, show_error=False)
+        fig_st = plot_spectrum_interactive(ref_wl, np.nan_to_num(stacked_norm), fl_smooth=stacked_smooth, err=None, title="Stacked Spectrum", bands=bands_for_plot, show_bands_flag=show_bands and not raw_only, show_error=False, x_label=x_label, y_label=y_label)
         st.plotly_chart(fig_st, use_container_width=True, key=make_key('stacked','plot'))
         if show_snr and bands_for_plot:
             st.subheader("Stacked SNR (approx)")
             st.json({mol: float(np.round(calc_snr_on_band(ref_wl, stacked_smooth, rng),4)) for mol,rng in bands_for_plot.items()})
         if enable_downloads:
-            df_stack = pd.DataFrame({"wavelength": ref_wl, "stacked": stacked_norm, "stacked_smoothed": stacked_smooth})
+            df_stack = pd.DataFrame({x_label: ref_wl, y_label: stacked_norm, f"{y_label}_smoothed": stacked_smooth})
             dl_key = make_key('stacked','download','csv','stacked_tab')
             st.download_button("Download stacked CSV", df_stack.to_csv(index=False).encode('utf-8'), file_name="stacked_spectrum.csv", mime='text/csv', key=dl_key)
 
@@ -421,7 +420,7 @@ with tabs[4]:
         label = f"{r['file']} (HDU {r.get('hdu_index')})"
         st.subheader(label)
         if r.get("wl") is not None and r.get("fl") is not None:
-            df = pd.DataFrame({"wavelength": r['wl'], "flux": r['fl']})
+            df = pd.DataFrame({r.get("x_label","Wavelength"): r['wl'], r.get("y_label","Flux"): r['fl']})
         elif r.get("orig_df") is not None:
             df = r.get("orig_df")
         else:
@@ -440,11 +439,10 @@ with tabs[5]:
             if r.get("wl") is None or r.get("fl") is None:
                 continue
             label = f"{r['file']}_hdu{r['hdu_index']}"
-            df = pd.DataFrame({"wavelength": r['wl'], "flux": r['fl']})
+            df = pd.DataFrame({r.get("x_label","Wavelength"): r['wl'], r.get("y_label","Flux"): r['fl']})
             dl_key = make_key(label, 'download', 'csv')
             st.download_button(f"CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{label}.csv", mime='text/csv', key=dl_key)
 
-        # stacked export (only if enough spectral results)
         spec_results = [r for r in results if r.get("wl") is not None and r.get("fl") is not None]
         if len(spec_results) >= 2 and stack_enabled:
             min_wl = min(np.nanmin(r['wl']) for r in spec_results)
@@ -455,7 +453,7 @@ with tabs[5]:
             stacked = np.nanmedian(arr, axis=0) if stack_method=="median" else np.nanmean(arr, axis=0)
             if np.nanmax(stacked) != np.nanmin(stacked):
                 stacked = (stacked - np.nanmin(stacked)) / (np.nanmax(stacked) - np.nanmin(stacked))
-            df_stack = pd.DataFrame({"wavelength": ref_wl, "stacked": stacked})
+            df_stack = pd.DataFrame({spec_results[0].get("x_label","Wavelength"): ref_wl, "stacked": stacked})
             dl_key = make_key('stacked','download','csv','downloads_tab')
             st.download_button("Download stacked CSV", df_stack.to_csv(index=False).encode('utf-8'), file_name="stacked_spectrum.csv", mime='text/csv', key=dl_key)
     else:
@@ -468,9 +466,7 @@ st.caption("AstroFlow · FITSFlow MVP — upload data, toggle options, export re
 with tabs[6]:
     st.header("FITS Images")
     found_image = False
-
     for r in results:
-        # only attempt if we have a path to a saved file
         if not r.get("path"):
             continue
         try:
@@ -488,24 +484,14 @@ with tabs[6]:
                             fig.savefig(buf, format="png")
                             buf.seek(0)
                             dl_key = make_key(r['file'], idx, 'image_download', time.time())
-                            st.download_button(
-                                label=f"Download Image (PNG) — {r['file']} HDU {idx}",
-                                data=buf,
-                                file_name=f"{r['file']}_hdu{idx}_image.png",
-                                mime="image/png",
-                                key=dl_key
-                            )
+                            st.download_button(label=f"Download Image (PNG) — {r['file']} HDU {idx}", data=buf, file_name=f"{r['file']}_hdu{idx}_image.png", mime="image/png", key=dl_key)
                         plt.close(fig)
         except Exception as e:
-            # Skip problematic file opening but show warning
             st.warning(f"Could not open {r.get('file')} for images: {e}")
-
     if not found_image:
         st.info("No 2D images found in uploaded FITS files.")
 
-# ---------------------------
 # Reports tab
-# ---------------------------
 with tabs[7]:
     st.header("Generate PDF Report")
     st.markdown("Compile spectra, images, and tables into a single PDF.")
@@ -516,16 +502,18 @@ with tabs[7]:
         images = []
         tables = []
 
-        # Save 1D spectra as PNGs using Matplotlib (avoids Kaleido)
+        # Save 1D spectra as PNGs using Matplotlib
         for res in results:
             if res.get("wl") is None or res.get("fl") is None:
                 continue
             wl, fl = res["wl"], res["fl"]
+            x_label = res.get("x_label", "Wavelength")
+            y_label = res.get("y_label", "Flux")
             buf = io.BytesIO()
             plt.figure(figsize=(6,4))
             plt.plot(wl, fl, color='blue')
-            plt.xlabel("Wavelength")
-            plt.ylabel("Flux")
+            plt.xlabel(x_label)
+            plt.ylabel(y_label)
             plt.title(f"{res['file']} HDU {res.get('hdu_index')}")
             plt.tight_layout()
             plt.savefig(buf, format="png")
@@ -536,13 +524,13 @@ with tabs[7]:
                 fh.write(buf.read())
             plots.append(img_path)
 
-            # Save CSV for each (only if wl/fl present)
-            df = pd.DataFrame({"wavelength": wl, "flux": fl})
+            # Save CSV for each
+            df = pd.DataFrame({x_label: wl, y_label: fl})
             csv_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res.get('hdu_index')}.csv")
             df.to_csv(csv_path, index=False)
             tables.append(csv_path)
 
-        # Collect 2D FITS images (from files that have path)
+        # Collect 2D FITS images
         for r in results:
             if not r.get("path"):
                 continue
@@ -569,16 +557,9 @@ with tabs[7]:
             st.error(f"Failed to generate PDF report: {e}")
             st.stop()
 
-        # Provide download button with unique key
         if os.path.exists(pdf_path):
             with open(pdf_path, "rb") as f:
-                st.download_button(
-                    label="Download PDF Report",
-                    data=f,
-                    file_name=os.path.basename(pdf_path),
-                    mime="application/pdf",
-                    key=make_key('pdf_report', int(time.time()))
-                )
+                st.download_button(label="Download PDF Report", data=f, file_name=os.path.basename(pdf_path), mime="application/pdf", key=make_key('pdf_report', int(time.time())))
         else:
             st.error("PDF report was not generated.")
 
@@ -587,7 +568,6 @@ with tabs[8]:
     st.header("Anomaly Detection")
     st.markdown("Lightweight detectors: z-score outliers, local dips, spikes. Tune thresholds in the sidebar.")
 
-    # detection params in sidebar
     st.sidebar.markdown("Anomaly detection settings")
     z_thresh = st.sidebar.slider("Outlier z-threshold", 3, 10, 4)
     dip_window = st.sidebar.slider("Dip median window (px)", 11, 501, 101, step=2)
@@ -599,8 +579,9 @@ with tabs[8]:
     for res in results:
         if res.get("wl") is None or res.get("fl") is None:
             continue
-        wl = res["wl"]
-        fl = res["fl"]
+        wl = res["wl"]; fl = res["fl"]
+        x_label = res.get("x_label", "Wavelength")
+        y_label = res.get("y_label", "Flux")
         params = {"z_thresh": z_thresh, "dip_window": dip_window, "dip_depth": dip_depth, "spike_window": spike_window, "spike_std": spike_std}
         anoms = detect_anomalies(wl, fl, params=params)
         for a in anoms:
@@ -609,7 +590,7 @@ with tabs[8]:
         anomalies_all += anoms
 
         st.subheader(f"{res['file']} (HDU {res.get('hdu_index')})")
-        fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} (HDU {res.get('hdu_index')})")
+        fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} (HDU {res.get('hdu_index')})", x_label=x_label, y_label=y_label)
         fig = annotate_plotly(fig, anoms)
         st.plotly_chart(fig, use_container_width=True, key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot'))
 
@@ -627,4 +608,4 @@ with tabs[8]:
     if anomalies_all and enable_downloads:
         df_an = pd.DataFrame(anomalies_all)
         dl_key_all = make_key('all','anomalies','csv')
-        st.download_button("Download all anomalies (CSV)", df_an.to_csv(index=False).encode('utf-8'), file_name="astroflow_anomalies.csv", mime="text/csv", key=dl_key_all)
+        st.download_button("Download all anomalies (CSV)", df_an.to_csv(index=False).encode('utf-8'), file_name="astroflow_anomalies.csv", mime='text/csv', key=dl_key_all)
