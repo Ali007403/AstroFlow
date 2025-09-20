@@ -1,3 +1,7 @@
+# near top of app.py imports
+from FitsFlow.csv_handler import ingest_csv_file
+from FitsFlow.detectors import detect_anomalies, annotate_plotly
+from FitsFlow.fields import detect_data_type, map_columns   # optional if needed in UI
 
 
 
