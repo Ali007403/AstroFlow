@@ -215,38 +215,25 @@ for i, up in enumerate(uploaded, start=1):
             st.error(f"Failed to parse CSV {fname}: {e}")
         continue
 
-    # FITS handling
-    try:
-        with fits.open(dst, memmap=False) as hdul:
-    for idx, hdu in enumerate(hdul):
-        wl, fl, labels = try_extract_spectrum(hdu)
+# --- FITS handling ---
+try:
+    with fits.open(dst, memmap=False) as hdul:
+        for idx, hdu in enumerate(hdul):
+            wl, fl, labels = try_extract_spectrum(hdu)
 
-        results.append({
-            "file": fname,
-            "path": dst,
-            "hdu_index": idx,
-            "header": dict(hdu.header) if hasattr(hdu, "header") else {},
-            "wl": np.array(wl, dtype=float) if wl is not None else None,
-            "fl": np.array(fl, dtype=float) if fl is not None else None,
-            "err": None,
-            "x_label": labels.get("x_label", "Wavelength") if labels else "Wavelength",
-            "y_label": labels.get("y_label", "Flux") if labels else "Flux",
-        })
-
-            if not found_any:
-                results.append({
-                    "file": fname,
-                    "path": dst,
-                    "hdu_index": None,
-                    "header": {},
-                    "wl": None,
-                    "fl": None,
-                    "err": None,
-                    "x_label": "Wavelength",
-                    "y_label": "Flux",
-                })
-    except Exception as e:
-        st.error(f"Failed to open {fname}: {e}")
+            results.append({
+                "file": fname,
+                "path": dst,
+                "hdu_index": idx,
+                "header": dict(hdu.header) if hasattr(hdu, "header") else {},
+                "wl": np.array(wl, dtype=float) if wl is not None else None,
+                "fl": np.array(fl, dtype=float) if fl is not None else None,
+                "err": None,
+                "x_label": labels.get("x_label", "Wavelength") if labels else "Wavelength",
+                "y_label": labels.get("y_label", "Flux") if labels else "Flux",
+            })
+except Exception as e:
+    st.error(f"Failed to open {fname}: {e}")
 
 progress.progress(100)
 time.sleep(0.2)
@@ -272,7 +259,8 @@ def plot_spectrum_interactive(
     show_bands_flag=True, show_error=False, x_label="Wavelength", y_label="Flux"
 ):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=wl, y=fl, mode='lines', name='raw', line=dict(color='rgba(0,150,200,0.7)')))
+    if wl is not None and fl is not None:
+        fig.add_trace(go.Scatter(x=wl, y=fl, mode='lines', name='raw', line=dict(color='rgba(0,150,200,0.7)')))
     if fl_smooth is not None:
         fig.add_trace(go.Scatter(x=wl, y=fl_smooth, mode='lines', name='smoothed', line=dict(color='black', width=2)))
     if show_error and err is not None:
@@ -280,8 +268,18 @@ def plot_spectrum_interactive(
         fig.add_trace(go.Scatter(x=wl, y=fl-err, mode='lines', name='err-', line=dict(width=0), showlegend=False, opacity=0.2))
     if show_bands_flag and bands:
         for mol,(a,b) in bands.items():
-            fig.add_vrect(x0=a, x1=b, fillcolor="LightSkyBlue", opacity=0.25, layer="below", line_width=0, annotation_text=mol, annotation_position="top left")
-    fig.update_layout(title=title, xaxis_title=x_label, yaxis_title=y_label, template="plotly_white", height=400)
+            fig.add_vrect(
+                x0=a, x1=b,
+                fillcolor="LightSkyBlue", opacity=0.25, layer="below", line_width=0,
+                annotation_text=mol, annotation_position="top left"
+            )
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_label,
+        yaxis_title=y_label,
+        template="plotly_white",
+        height=400
+    )
     return fig
 
 # Raw tab
