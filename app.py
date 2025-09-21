@@ -218,24 +218,21 @@ for i, up in enumerate(uploaded, start=1):
     # FITS handling
     try:
         with fits.open(dst, memmap=False) as hdul:
-            found_any = False
-            for idx, hdu in enumerate(hdul):
-                wl, fl, labels = try_extract_spectrum(hdu)
-                if wl is None:
-                    continue
-                found_any = True
-                err = None
-                results.append({
-                    "file": fname,
-                    "path": dst,
-                    "hdu_index": idx,
-                    "header": dict(hdu.header) if hasattr(hdu, "header") else {},
-                    "wl": np.array(wl, dtype=float),
-                    "fl": np.array(fl, dtype=float),
-                    "err": err,
-                    "x_label": labels.get("x_label", "Wavelength"),
-                    "y_label": labels.get("y_label", "Flux"),
-                })
+    for idx, hdu in enumerate(hdul):
+        wl, fl, labels = try_extract_spectrum(hdu)
+
+        results.append({
+            "file": fname,
+            "path": dst,
+            "hdu_index": idx,
+            "header": dict(hdu.header) if hasattr(hdu, "header") else {},
+            "wl": np.array(wl, dtype=float) if wl is not None else None,
+            "fl": np.array(fl, dtype=float) if fl is not None else None,
+            "err": None,
+            "x_label": labels.get("x_label", "Wavelength") if labels else "Wavelength",
+            "y_label": labels.get("y_label", "Flux") if labels else "Flux",
+        })
+
             if not found_any:
                 results.append({
                     "file": fname,
