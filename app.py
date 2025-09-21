@@ -1,3 +1,10 @@
+# Copyright (c) 2025 <Ali Nawaz>
+# All rights reserved.
+# Licensed for non-commercial evaluation and demonstration only.
+# No copying, redistribution, or commercial use without written permission.
+# Contact: <alinawaz9519@gmail.com>
+
+
 # app.py (updated with dynamic axis labels)
 from FitsFlow.csv_handler import ingest_csv_file
 from FitsFlow.detectors import detect_anomalies, annotate_plotly
