@@ -1,11 +1,14 @@
-pandas
-numpy
+streamlit==1.19.0
+altair==4.2.2
+
+numpy<2.5
+pandas<3.1
+
 astropy
 scipy
 matplotlib
-streamlit
 plotly
-kaleido # optional for saving plotly images
-reportlab # optional for PDF reports
-fpdf # alternative for PDF
+kaleido
+reportlab
+fpdf
 pytest
